@@ -44,12 +44,14 @@ struct KpiCell: View {
 
 /// Thin vertical hairline divider between KPI cells.
 /// Uses the aluminum-aged color at low opacity for an Audi MMI feel.
+/// Explicit height: a bare `Rectangle().frame(width:1)` is greedy in the
+/// other axis and would inflate the surrounding HStack to consume all
+/// available vertical space in its parent VStack.
 struct KpiDivider: View {
     var body: some View {
         Rectangle()
-            .fill(SQ5Colors.aluminum.opacity(0.18))
-            .frame(width: 1)
-            .padding(.vertical, 10)
+            .fill(SQ5Colors.aluminum.opacity(0.22))
+            .frame(width: 1, height: 56)
     }
 }
 

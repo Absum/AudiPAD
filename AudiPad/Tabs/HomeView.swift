@@ -15,9 +15,16 @@ struct HomeView: View {
             SQ5Colors.background.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Thin top-right status row (no Audi/SQ5 wordmark — that lives in the NavRail)
+                // Top header: SQ5 brand mark on the left (where the Audi wordmark used to
+                // sit), ambient status pills + clock on the right.
                 HStack(spacing: 14) {
+                    Image("SQ5Logo")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(height: 30)
+
                     Spacer()
+
                     StatusPill(symbol: "thermometer.medium", value: "23°", caption: "AIR")
                     StatusPill(symbol: "fuelpump.fill",      value: "65%", caption: "FUEL")
                     Text(Date().formatted(date: .omitted, time: .shortened))
@@ -26,7 +33,7 @@ struct HomeView: View {
                         .monospacedDigit()
                 }
                 .padding(.horizontal, 26)
-                .padding(.top, 18)
+                .padding(.top, 16)
                 .padding(.bottom, 8)
 
                 // Gauge cluster (Audi-S line: large outer + small center boost), with the
@@ -42,27 +49,20 @@ struct HomeView: View {
                                  majorStep: 20)
                             .frame(maxWidth: .infinity)
 
-                        VStack(spacing: 18) {
-                            // Boost (CGQB 3.0 V6 BiTDI, stock):
-                            // peak ~1.9–2.2 bar absolute (≈ 0.9–1.2 bar gauge/relative).
-                            // Range 0–2.5 absolute with redline at 2.0; OBD reports
-                            // absolute, so this matches what the live PID will feed in.
-                            SQ5Gauge(value: 1.8,
-                                     minValue: 0,
-                                     maxValue: 2.5,
-                                     label: "Boost",
-                                     unit: "bar",
-                                     redlineStart: 2.0,
-                                     majorStep: 0.5,
-                                     minorBetween: 1,
-                                     formatter: { String(format: "%.1f", $0) })
-                                .frame(width: 210)
-
-                            Image("SQ5Logo")
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(height: 48)
-                        }
+                        // Boost (CGQB 3.0 V6 BiTDI, stock):
+                        // peak ~1.9–2.2 bar absolute (≈ 0.9–1.2 bar gauge/relative).
+                        // Range 0–2.5 absolute with redline at 2.0; OBD reports
+                        // absolute, so this matches what the live PID will feed in.
+                        SQ5Gauge(value: 1.8,
+                                 minValue: 0,
+                                 maxValue: 2.5,
+                                 label: "Boost",
+                                 unit: "bar",
+                                 redlineStart: 2.0,
+                                 majorStep: 0.5,
+                                 minorBetween: 1,
+                                 formatter: { String(format: "%.1f", $0) })
+                            .frame(width: 210)
 
                         SQ5Gauge(value: 2400,
                                  minValue: 0,
