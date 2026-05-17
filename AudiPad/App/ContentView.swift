@@ -12,7 +12,7 @@ struct ContentView: View {
         HStack(spacing: 0) {
             NavRail(selection: $selectedTab)
 
-            ZStack(alignment: .top) {
+            ZStack(alignment: .bottom) {
                 Group {
                     switch selectedTab {
                     case .home:     HomeView()
@@ -29,8 +29,8 @@ struct ContentView: View {
                 if let approach = cameras.nearestApproaching {
                     SpeedCameraAlertBanner(approach: approach)
                         .padding(.horizontal, 24)
-                        .padding(.top, 76)   // sits just under the TopBar row
-                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .padding(.bottom, 24)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                         .zIndex(10)
                 }
             }
