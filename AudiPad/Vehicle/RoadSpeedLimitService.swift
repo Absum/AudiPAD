@@ -49,6 +49,11 @@ final class RoadSpeedLimitService: ObservableObject {
     private var vmsReading: Reading?
     private var digiroadReading: Reading?
 
+    /// Raw Digiroad segments kept around so we can answer "what road
+    /// link is this coordinate on?" — used by the speed-camera same-
+    /// road gate. Replaced on every Digiroad fetch.
+    private var digiroadSegments: [DigiroadCachedSegment] = []
+
     /// Cached list of all VMS speed-limit signs nationwide. Refreshed on
     /// the VMS cadence; nearest-sign lookup runs on every coord change.
     private var vmsSigns: [VMSSign] = []
@@ -215,19 +220,30 @@ final class RoadSpeedLimitService: ObservableObject {
             let payload = try JSONDecoder().decode(DigiroadResponse.self, from: data)
             lastDigiroadQueriedCoord = coord
 
+            // Cache every usable segment (geometry + link_id) so the
+            // same-road snapper can resolve arbitrary coords later
+            // without a re-fetch.
+            digiroadSegments = payload.features.compactMap { feature -> DigiroadCachedSegment? in
+                guard let linkId = feature.properties.linkId,
+                      let coords = feature.geometry?.coordinates,
+                      !coords.isEmpty
+                else { return nil }
+                let vertices: [CLLocationCoordinate2D] = coords.compactMap {
+                    guard $0.count >= 2 else { return nil }
+                    return CLLocationCoordinate2D(latitude: $0[1], longitude: $0[0])
+                }
+                guard !vertices.isEmpty else { return nil }
+                return DigiroadCachedSegment(linkId: linkId,
+                                             limit: feature.properties.arvo,
+                                             vertices: vertices)
+            }
+
             let userLoc = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
-            let nearest = payload.features
-                .compactMap { feature -> (limit: Int, dist: CLLocationDistance)? in
-                    guard let limit = feature.properties.arvo,
-                          (10...130).contains(limit),
-                          let coords = feature.geometry?.coordinates,
-                          !coords.isEmpty
-                    else { return nil }
-                    let dist = coords
-                        .compactMap { vertex -> CLLocationDistance? in
-                            guard vertex.count >= 2 else { return nil }
-                            return userLoc.distance(from: CLLocation(latitude: vertex[1], longitude: vertex[0]))
-                        }
+            let nearest = digiroadSegments
+                .compactMap { seg -> (limit: Int, dist: CLLocationDistance)? in
+                    guard let limit = seg.limit, (10...130).contains(limit) else { return nil }
+                    let dist = seg.vertices
+                        .map { userLoc.distance(from: CLLocation(latitude: $0.latitude, longitude: $0.longitude)) }
                         .min() ?? .infinity
                     return (limit, dist)
                 }
@@ -251,6 +267,32 @@ final class RoadSpeedLimitService: ObservableObject {
         } catch {
             lastError = "Digiroad network: \(error.localizedDescription)"
         }
+    }
+
+    // MARK: - Road link snap (for speed-camera same-road gate)
+
+    /// Returns the `link_id` of the Digiroad road link nearest to `coord`,
+    /// or nil if no segment vertex is within `maxDistance` metres. Useful
+    /// for "is the user and the camera on the same road?" checks.
+    ///
+    /// O(N×V) over cached segments × vertices; N is bounded by the bbox
+    /// the service queries (~100–500 segments in dense urban Helsinki),
+    /// so this is cheap to call from per-frame paths.
+    func linkID(near coord: CLLocationCoordinate2D,
+                maxDistance: CLLocationDistance = 30) -> String? {
+        let target = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+        var bestLink: String?
+        var bestDist: CLLocationDistance = .infinity
+        for seg in digiroadSegments {
+            for v in seg.vertices {
+                let d = target.distance(from: CLLocation(latitude: v.latitude, longitude: v.longitude))
+                if d < bestDist {
+                    bestDist = d
+                    bestLink = seg.linkId
+                }
+            }
+        }
+        return bestDist <= maxDistance ? bestLink : nil
     }
 
     // MARK: - VMS fetch (Phase 2)
@@ -491,4 +533,18 @@ private struct DigiroadGeometry: Decodable {
 
 private struct DigiroadProperties: Decodable {
     let arvo: Int?
+    let linkId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case arvo
+        case linkId = "link_id"
+    }
+}
+
+/// Lightweight cache of a single Digiroad segment, kept around in
+/// `RoadSpeedLimitService` for the same-road snapper to read.
+private struct DigiroadCachedSegment {
+    let linkId: String
+    let limit: Int?
+    let vertices: [CLLocationCoordinate2D]
 }

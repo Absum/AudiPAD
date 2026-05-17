@@ -91,10 +91,19 @@ final class SpeedCameraMonitor: ObservableObject {
     }
 
     /// Update with the current camera list + the user's full CLLocation
-    /// (we need speed + course, not just the coordinate). All three
-    /// gates must pass — distance, motion, heading-toward, and
-    /// optionally camera-facing — for an alert to surface.
-    func update(cameras: [SpeedCamera], userLocation loc: CLLocation) {
+    /// (we need speed + course, not just the coordinate). All gates
+    /// must pass — distance, motion, heading-toward, optionally
+    /// camera-facing, and optionally same-road — for an alert to
+    /// surface.
+    ///
+    /// `linkID` is an optional snapper closure (typically backed by
+    /// `RoadSpeedLimitService.linkID(near:)`). When both user and
+    /// camera resolve to non-nil link IDs and they differ, the camera
+    /// is suppressed. If either snap is nil (no Digiroad data near
+    /// that point) we don't penalize — heading + facing carry the load.
+    func update(cameras: [SpeedCamera],
+                userLocation loc: CLLocation,
+                linkID: ((CLLocationCoordinate2D) -> String?)? = nil) {
         // Speed gate. CLLocation.speed is m/s; -1 when invalid.
         let speedKph = max(0, loc.speed) * 3.6
         guard speedKph >= minSpeedKph else {
@@ -109,6 +118,11 @@ final class SpeedCameraMonitor: ObservableObject {
             return
         }
         let course = loc.course
+
+        // Resolve the user's road link once (instead of per-camera). nil
+        // means "no Digiroad data within snap radius" — same-road gate
+        // is skipped entirely in that case.
+        let userLinkId = linkID?(loc.coordinate)
 
         let nearest = cameras
             .compactMap { cam -> (SpeedCamera, CLLocationDistance)? in
@@ -134,6 +148,16 @@ final class SpeedCameraMonitor: ObservableObject {
                     guard Self.angularDelta(course, camWatchesCourse) <= cameraFacingHalfConeDeg else {
                         return nil
                     }
+                }
+
+                // Same-road via Digiroad link snap. Only enforced when
+                // both ends resolve — missing data must not silence
+                // legitimate alerts on roads outside the cached bbox.
+                if let snap = linkID,
+                   let userLink = userLinkId,
+                   let camLink = snap(cam.coordinate),
+                   userLink != camLink {
+                    return nil
                 }
 
                 return (cam, dist)

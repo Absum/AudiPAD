@@ -99,13 +99,17 @@ struct ContentView: View {
         .onReceive(locationService.$location) { loc in
             // Camera approach: only evaluate against a real GPS fix. No fix
             // → no banner. The monitor applies speed + heading + camera-
-            // facing gates on top of distance.
+            // facing + same-road gates on top of distance.
             guard let loc else { return }
-            cameras.update(cameras: cameraService.cameras, userLocation: loc)
+            cameras.update(cameras: cameraService.cameras,
+                           userLocation: loc,
+                           linkID: { [roadLimits] coord in roadLimits.linkID(near: coord) })
         }
         .onReceive(cameraService.$cameras) { latest in
             guard let loc = locationService.location else { return }
-            cameras.update(cameras: latest, userLocation: loc)
+            cameras.update(cameras: latest,
+                           userLocation: loc,
+                           linkID: { [roadLimits] coord in roadLimits.linkID(near: coord) })
         }
         .onReceive(traffic.$incidents) { incidents in
             trafficMonitor.update(incidents: incidents,
