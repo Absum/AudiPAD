@@ -28,7 +28,7 @@ struct TopBar: View {
                 .monospacedDigit()
         }
         .padding(.horizontal, 26)
-        .padding(.top, 24)
-        .padding(.bottom, 8)
+        .padding(.top, 40)
+        .padding(.bottom, 14)
     }
 }
