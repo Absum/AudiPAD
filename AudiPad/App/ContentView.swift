@@ -98,15 +98,14 @@ struct ContentView: View {
         }
         .onReceive(locationService.$location) { loc in
             // Camera approach: only evaluate against a real GPS fix. No fix
-            // → no banner. Avoids the bench-time false alerts that the
-            // simulated vehicle coord used to cause when it sat next to an
-            // OSM camera.
-            guard let coord = loc?.coordinate else { return }
-            cameras.update(cameras: cameraService.cameras, vehicle: coord)
+            // → no banner. The monitor applies speed + heading + camera-
+            // facing gates on top of distance.
+            guard let loc else { return }
+            cameras.update(cameras: cameraService.cameras, userLocation: loc)
         }
         .onReceive(cameraService.$cameras) { latest in
-            guard let coord = locationService.location?.coordinate else { return }
-            cameras.update(cameras: latest, vehicle: coord)
+            guard let loc = locationService.location else { return }
+            cameras.update(cameras: latest, userLocation: loc)
         }
         .onReceive(traffic.$incidents) { incidents in
             trafficMonitor.update(incidents: incidents,

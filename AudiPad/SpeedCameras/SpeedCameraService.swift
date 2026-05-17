@@ -152,12 +152,14 @@ private struct CameraStorage: Codable {
     let lon: Double
     let limit: Int
     let kind: String   // raw string of SpeedCamera.Kind
+    let direction: Double?
 
     init(from cam: SpeedCamera) {
         self.lat = cam.coordinate.latitude
         self.lon = cam.coordinate.longitude
         self.limit = cam.speedLimit
         self.kind = cam.kind.rawValue
+        self.direction = cam.direction
     }
 
     var asCamera: SpeedCamera {
@@ -165,7 +167,8 @@ private struct CameraStorage: Codable {
             latitude: lat,
             longitude: lon,
             speedLimit: limit,
-            kind: SpeedCamera.Kind(rawValue: kind) ?? .fixed
+            kind: SpeedCamera.Kind(rawValue: kind) ?? .fixed,
+            direction: direction
         )
     }
 }
@@ -187,7 +190,40 @@ extension SpeedCamera {
             }
             return .fixed
         }()
+        let direction = tags["direction"].flatMap(Self.parseOSMDirection)
         return SpeedCamera(latitude: node.lat, longitude: node.lon,
-                           speedLimit: maxspeed, kind: kind)
+                           speedLimit: maxspeed, kind: kind,
+                           direction: direction)
+    }
+
+    /// Parse an OSM `direction` tag. Accepts numeric compass degrees
+    /// ("90", "180.5") and 16-point cardinal abbreviations ("N", "NNE",
+    /// "NE", … "NW", "NNW"). Returns nil for anything else.
+    static func parseOSMDirection(_ raw: String) -> Double? {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        if let n = Double(trimmed) {
+            // Normalize to [0, 360)
+            let mod = n.truncatingRemainder(dividingBy: 360)
+            return mod < 0 ? mod + 360 : mod
+        }
+        switch trimmed.uppercased() {
+        case "N":    return 0
+        case "NNE":  return 22.5
+        case "NE":   return 45
+        case "ENE":  return 67.5
+        case "E":    return 90
+        case "ESE":  return 112.5
+        case "SE":   return 135
+        case "SSE":  return 157.5
+        case "S":    return 180
+        case "SSW":  return 202.5
+        case "SW":   return 225
+        case "WSW":  return 247.5
+        case "W":    return 270
+        case "WNW":  return 292.5
+        case "NW":   return 315
+        case "NNW":  return 337.5
+        default:     return nil
+        }
     }
 }

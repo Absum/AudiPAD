@@ -12,16 +12,25 @@ struct SpeedCamera: Identifiable, Hashable {
     let coordinate: CLLocationCoordinate2D
     let speedLimit: Int     // km/h
     let kind: Kind
+    /// Direction the camera *faces*, in compass degrees (0° = N,
+    /// clockwise). Source: OSM `direction` tag on the speed_camera
+    /// node, when present. A camera that "faces south" (180°) watches
+    /// traffic approaching from the south — i.e. catches drivers
+    /// heading north. nil when OSM has no tag — coverage in Finland
+    /// is maybe ~40% of cameras.
+    let direction: Double?
 
     init(id: UUID = UUID(),
          latitude: Double,
          longitude: Double,
          speedLimit: Int,
-         kind: Kind = .fixed) {
+         kind: Kind = .fixed,
+         direction: Double? = nil) {
         self.id = id
         self.coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
         self.speedLimit = speedLimit
         self.kind = kind
+        self.direction = direction
     }
 
     // Equatable / Hashable manually since CLLocationCoordinate2D isn't Hashable.
@@ -57,31 +66,105 @@ final class SpeedCameraMonitor: ObservableObject {
 
     /// Alert when within this many meters of any camera.
     let alertRadiusMeters: CLLocationDistance
+    /// Below this user speed, no alerts (parked / very slow traffic).
+    let minSpeedKph: Double
+    /// User course must point within ±this many degrees of the
+    /// bearing from user → camera. Keeps perpendicular roads quiet.
+    let approachHalfConeDeg: Double
+    /// When a camera has a `direction` tag, user's course must be
+    /// within ±this many degrees of the opposite of the camera's
+    /// facing (i.e. camera is set up to actually catch us). More
+    /// generous than the approach cone because OSM angles are
+    /// approximate and roads curve.
+    let cameraFacingHalfConeDeg: Double
 
     @Published private(set) var nearestApproaching: Approaching?
 
-    init(alertRadiusMeters: CLLocationDistance = 1000) {
+    init(alertRadiusMeters: CLLocationDistance = 1000,
+         minSpeedKph: Double = 5,
+         approachHalfConeDeg: Double = 45,
+         cameraFacingHalfConeDeg: Double = 60) {
         self.alertRadiusMeters = alertRadiusMeters
+        self.minSpeedKph = minSpeedKph
+        self.approachHalfConeDeg = approachHalfConeDeg
+        self.cameraFacingHalfConeDeg = cameraFacingHalfConeDeg
     }
 
-    /// Update with the current camera list + vehicle location. Cameras
-    /// are supplied per-call so we can swap data sources (mock list vs
-    /// live OSM/Overpass) without re-wiring the monitor.
-    func update(cameras: [SpeedCamera], vehicle coord: CLLocationCoordinate2D) {
-        let here = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+    /// Update with the current camera list + the user's full CLLocation
+    /// (we need speed + course, not just the coordinate). All three
+    /// gates must pass — distance, motion, heading-toward, and
+    /// optionally camera-facing — for an alert to surface.
+    func update(cameras: [SpeedCamera], userLocation loc: CLLocation) {
+        // Speed gate. CLLocation.speed is m/s; -1 when invalid.
+        let speedKph = max(0, loc.speed) * 3.6
+        guard speedKph >= minSpeedKph else {
+            if nearestApproaching != nil { nearestApproaching = nil }
+            return
+        }
+        // Course gate: invalid course means we don't know direction →
+        // can't run the heading test, so don't alert (the user can't
+        // be moving meaningfully with course = -1 anyway).
+        guard loc.course >= 0 else {
+            if nearestApproaching != nil { nearestApproaching = nil }
+            return
+        }
+        let course = loc.course
+
         let nearest = cameras
-            .map { cam -> (SpeedCamera, CLLocationDistance) in
+            .compactMap { cam -> (SpeedCamera, CLLocationDistance)? in
                 let camLoc = CLLocation(latitude: cam.coordinate.latitude,
                                         longitude: cam.coordinate.longitude)
-                return (cam, here.distance(from: camLoc))
+                let dist = loc.distance(from: camLoc)
+                guard dist <= alertRadiusMeters else { return nil }
+
+                // Heading-toward: am I driving in the direction of
+                // the camera? Bearing from me to it should match my
+                // course to within the approach cone.
+                let bearing = Self.bearing(from: loc.coordinate, to: cam.coordinate)
+                guard Self.angularDelta(course, bearing) <= approachHalfConeDeg else {
+                    return nil
+                }
+
+                // Camera-facing (only when we have direction data):
+                // if the camera faces 180° (south), it monitors traffic
+                // coming from the south driving north. So user's course
+                // should match (camera.direction + 180) mod 360.
+                if let camDir = cam.direction {
+                    let camWatchesCourse = (camDir + 180).truncatingRemainder(dividingBy: 360)
+                    guard Self.angularDelta(course, camWatchesCourse) <= cameraFacingHalfConeDeg else {
+                        return nil
+                    }
+                }
+
+                return (cam, dist)
             }
-            .filter { $0.1 <= alertRadiusMeters }
             .min(by: { $0.1 < $1.1 })
 
         let next = nearest.map { Approaching(camera: $0.0, distanceMeters: $0.1) }
         if next != nearestApproaching {
             nearestApproaching = next
         }
+    }
+
+    // MARK: - Geometry helpers
+
+    /// Initial bearing from `from` to `to`, in compass degrees
+    /// (0° = N, 90° = E). Standard great-circle formula.
+    static func bearing(from: CLLocationCoordinate2D, to: CLLocationCoordinate2D) -> Double {
+        let lat1 = from.latitude * .pi / 180
+        let lat2 = to.latitude * .pi / 180
+        let dLon = (to.longitude - from.longitude) * .pi / 180
+        let y = sin(dLon) * cos(lat2)
+        let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
+        let deg = atan2(y, x) * 180 / .pi
+        return (deg + 360).truncatingRemainder(dividingBy: 360)
+    }
+
+    /// Smallest positive angle between two compass bearings, in degrees.
+    /// Always in `[0, 180]`.
+    static func angularDelta(_ a: Double, _ b: Double) -> Double {
+        let diff = abs(a - b).truncatingRemainder(dividingBy: 360)
+        return min(diff, 360 - diff)
     }
 }
 
