@@ -18,13 +18,17 @@ struct MapTabView: View {
     enum FollowMode {
         case none           // free pan/zoom
         case follow         // centered on user, no rotation, slight tilt
-        case followHeading  // navigation: rotates with heading, steep tilt
+        case followHeading  // navigation: steep tilt + centered on user
 
+        /// `.followWithHeading` requires active heading updates from a
+        /// calibrated compass — unreliable when the device is stationary or
+        /// indoor. We use `.follow` for both modes so the user dot is always
+        /// centered; the visual difference between `.follow` and
+        /// `.followHeading` is the camera pitch.
         var trackingMode: MKUserTrackingMode {
             switch self {
-            case .none:          return .none
-            case .follow:        return .follow
-            case .followHeading: return .followWithHeading
+            case .none:                  return .none
+            case .follow, .followHeading: return .follow
             }
         }
 
@@ -675,15 +679,13 @@ private struct MapBackground: UIViewRepresentable {
         )
         map.setCamera(cam, animated: false)
 
-        // Detect user gestures so we can drop out of follow modes
+        // Detect user PAN gestures so we drop out of follow modes when the
+        // user explicitly drags the map. Pinch (zoom) is NOT intercepted —
+        // zoom shouldn't kill nav mode, only re-centering should.
         let pan = UIPanGestureRecognizer(target: context.coordinator,
                                          action: #selector(Coordinator.handleUserInteraction))
         pan.delegate = context.coordinator
         map.addGestureRecognizer(pan)
-        let pinch = UIPinchGestureRecognizer(target: context.coordinator,
-                                             action: #selector(Coordinator.handleUserInteraction))
-        pinch.delegate = context.coordinator
-        map.addGestureRecognizer(pinch)
         context.coordinator.onUserInteraction = onUserInteraction
 
         return map
