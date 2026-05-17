@@ -23,7 +23,7 @@ struct TopBar: View {
                        value: "\(Int(fuelPercent.rounded()))%",
                        caption: "FUEL")
             Text(Date().formatted(date: .omitted, time: .shortened))
-                .font(SQ5Typography.subtitle)
+                .font(.system(size: 24, weight: .medium, design: .default))
                 .foregroundStyle(SQ5Colors.textSecondary)
                 .monospacedDigit()
         }
