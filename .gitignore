@@ -11,6 +11,12 @@ DerivedData/
 xcuserdata/
 *.moved-aside
 
+# XcodeGen-generated artifacts — project.yml is the source of truth.
+# Regenerate with `xcodegen generate`.
+*.xcodeproj/
+*.xcworkspace/
+AudiPad/Info.plist
+
 # Xcode legacy artifacts
 *.pbxuser
 !default.pbxuser
