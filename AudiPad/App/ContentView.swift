@@ -68,6 +68,7 @@ struct ContentView: View {
         .environmentObject(vehicle)
         .environmentObject(locationService)
         .environmentObject(traffic)
+        .environmentObject(cameraService)
         .background(SQ5Colors.background.ignoresSafeArea())
         .onAppear {
             traffic.start(movingProvider: { [weak vehicle] in
