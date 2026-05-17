@@ -43,6 +43,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
+        NSLocationWhenInUseUsageDescription: AudiPad uses your location to show your position on the map, follow you during navigation, and warn about nearby speed cameras.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.absum.audipad

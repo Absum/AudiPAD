@@ -7,6 +7,7 @@ struct ContentView: View {
     /// features (speed camera monitor) can subscribe to one source.
     @StateObject private var vehicle = VehicleViewModel()
     @StateObject private var cameras = SpeedCameraMonitor()
+    @StateObject private var locationService = LocationService()
 
     var body: some View {
         HStack(spacing: 0) {
@@ -40,6 +41,7 @@ struct ContentView: View {
             .animation(.easeOut(duration: 0.3), value: cameras.nearestApproaching != nil)
         }
         .environmentObject(vehicle)
+        .environmentObject(locationService)
         .background(SQ5Colors.background.ignoresSafeArea())
         .onReceive(vehicle.$snapshot) { snap in
             cameras.update(vehicle: snap.coordinate)

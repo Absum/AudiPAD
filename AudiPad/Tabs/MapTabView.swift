@@ -1,21 +1,54 @@
 import SwiftUI
 import MapKit
 import Combine
+import CoreLocation
 
 struct MapTabView: View {
+    @EnvironmentObject private var location: LocationService
     @StateObject private var vm = MapViewModel()
     @StateObject private var completer = SearchCompleter()
     @State private var searchText: String = ""
     @State private var isSearching: Bool = false
     @FocusState private var searchFocused: Bool
 
+    /// Map's current following behavior. Drives both `MKUserTrackingMode`
+    /// and the camera pitch.
+    @State private var followMode: FollowMode = .none
+
+    enum FollowMode {
+        case none           // free pan/zoom
+        case follow         // centered on user, no rotation, slight tilt
+        case followHeading  // navigation: rotates with heading, steep tilt
+
+        var trackingMode: MKUserTrackingMode {
+            switch self {
+            case .none:          return .none
+            case .follow:        return .follow
+            case .followHeading: return .followWithHeading
+            }
+        }
+
+        var pitch: CGFloat {
+            switch self {
+            case .none:          return 40
+            case .follow:        return 50
+            case .followHeading: return 60
+            }
+        }
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
-            MapBackground(region: $vm.region,
-                          routePolyline: vm.routePolyline)
-                .ignoresSafeArea()
+            MapBackground(
+                region: $vm.region,
+                routePolyline: vm.routePolyline,
+                followMode: followMode,
+                showsUser: location.isAuthorized,
+                onUserInteraction: { followMode = .none }
+            )
+            .ignoresSafeArea()
 
-            // Top gradient so the header reads cleanly over any map tile color
+            // Top gradient
             LinearGradient(
                 colors: [SQ5Colors.background.opacity(0.95),
                          SQ5Colors.background.opacity(0.0)],
@@ -25,13 +58,19 @@ struct MapTabView: View {
             .ignoresSafeArea(edges: .top)
             .allowsHitTesting(false)
 
-            // Zoom controls — floating on the trailing edge of the map
+            // Right-edge floating control stack: center-on-me, zoom in, zoom out
             VStack {
                 Spacer()
-                ZoomControls(onZoomIn: { vm.zoomIn() }, onZoomOut: { vm.zoomOut() })
-                    .padding(.trailing, 24)
-                    .padding(.bottom, vm.routeInfo == nil ? 26 : 130)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                MapControls(
+                    canCenter: location.isAuthorized && location.location != nil,
+                    isFollowing: followMode != .none,
+                    onCenter: { centerOnUser() },
+                    onZoomIn: { vm.zoomIn() },
+                    onZoomOut: { vm.zoomOut() }
+                )
+                .padding(.trailing, 24)
+                .padding(.bottom, vm.routeInfo == nil ? 26 : 150)
+                .frame(maxWidth: .infinity, alignment: .trailing)
             }
             .ignoresSafeArea(edges: .bottom)
 
@@ -65,6 +104,7 @@ struct MapTabView: View {
                             searchText = ""
                             completer.clear()
                             vm.clearRoute()
+                            followMode = .none
                         } label: {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.system(size: 16))
@@ -86,7 +126,6 @@ struct MapTabView: View {
                 .padding(.top, 4)
                 .padding(.bottom, 6)
 
-                // Suggestion list — predictive completions while typing
                 if searchFocused && !completer.results.isEmpty {
                     SuggestionList(
                         results: completer.results,
@@ -99,7 +138,6 @@ struct MapTabView: View {
                     .padding(.horizontal, 26)
                     .padding(.bottom, 6)
                 }
-                // Recents — when search empty and focused
                 else if searchFocused && searchText.isEmpty && !vm.recentDestinations.isEmpty {
                     RecentDestinationsList(
                         names: vm.recentDestinations,
@@ -120,7 +158,6 @@ struct MapTabView: View {
 
                 Spacer()
 
-                // Route info — navigation-mode card with next-turn step
                 if let info = vm.routeInfo {
                     NavigationCard(
                         info: info,
@@ -128,6 +165,7 @@ struct MapTabView: View {
                         onClear: {
                             searchText = ""
                             vm.clearRoute()
+                            followMode = .none
                         }
                     )
                     .padding(.horizontal, 26)
@@ -136,6 +174,17 @@ struct MapTabView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: vm.routeInfo != nil)
+        }
+        .onAppear {
+            location.requestPermission()
+        }
+        .onChange(of: vm.routeInfo != nil) { hasRoute in
+            // Auto-enter navigation mode when a route is set; relax back on clear.
+            if hasRoute {
+                followMode = .followHeading
+            } else if followMode == .followHeading {
+                followMode = .none
+            }
         }
     }
 
@@ -156,27 +205,61 @@ struct MapTabView: View {
             await MainActor.run { isSearching = false }
         }
     }
+
+    private func centerOnUser() {
+        guard let here = location.location else { return }
+        vm.region = MKCoordinateRegion(
+            center: here.coordinate,
+            span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+        )
+        followMode = vm.routeInfo != nil ? .followHeading : .follow
+    }
 }
 
-// MARK: - Zoom controls
+// MARK: - Floating map controls (right-edge column)
 
-private struct ZoomControls: View {
+private struct MapControls: View {
+    let canCenter: Bool
+    let isFollowing: Bool
+    let onCenter: () -> Void
     let onZoomIn: () -> Void
     let onZoomOut: () -> Void
 
     var body: some View {
-        VStack(spacing: 6) {
-            ZoomButton(symbol: "plus", action: onZoomIn)
-            ZoomButton(symbol: "minus", action: onZoomOut)
+        VStack(spacing: 10) {
+            // Center-on-me button (separate card so it visually stands apart)
+            Button(action: onCenter) {
+                Image(systemName: isFollowing ? "location.fill" : "location")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(canCenter ? (isFollowing ? SQ5Colors.accent : SQ5Colors.textPrimary)
+                                               : SQ5Colors.textTertiary)
+                    .frame(width: 48, height: 48)
+            }
+            .buttonStyle(.plain)
+            .disabled(!canCenter)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(SQ5Colors.surface.opacity(0.94))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(SQ5Colors.border, lineWidth: 1)
+                    )
+            )
+
+            // Zoom in / out stack
+            VStack(spacing: 6) {
+                ZoomButton(symbol: "plus", action: onZoomIn)
+                ZoomButton(symbol: "minus", action: onZoomOut)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(SQ5Colors.surface.opacity(0.94))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(SQ5Colors.border, lineWidth: 1)
+                    )
+            )
         }
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(SQ5Colors.surface.opacity(0.94))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(SQ5Colors.border, lineWidth: 1)
-                )
-        )
     }
 }
 
@@ -322,16 +405,13 @@ private struct NavigationCard: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            // Next-turn row
             if let step = nextStep {
                 HStack(spacing: 12) {
                     Image(systemName: "arrow.turn.up.right")
                         .font(.system(size: 22, weight: .semibold))
                         .foregroundStyle(SQ5Colors.accent)
                         .frame(width: 36, height: 36)
-                        .background(
-                            Circle().fill(SQ5Colors.surfaceElevated)
-                        )
+                        .background(Circle().fill(SQ5Colors.surfaceElevated))
                     Text(step)
                         .font(SQ5Typography.subtitle)
                         .foregroundStyle(SQ5Colors.textPrimary)
@@ -340,7 +420,6 @@ private struct NavigationCard: View {
                 }
             }
 
-            // Destination + distance + ETA row
             HStack(spacing: 18) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("DESTINATION")
@@ -388,12 +467,11 @@ private struct NavigationCard: View {
     }
 }
 
-// MARK: - Search completer (MKLocalSearchCompleter wrapper)
+// MARK: - Search completer
 
 @MainActor
 final class SearchCompleter: NSObject, ObservableObject, MKLocalSearchCompleterDelegate {
     @Published private(set) var results: [MKLocalSearchCompletion] = []
-
     private let completer = MKLocalSearchCompleter()
 
     override init() {
@@ -436,7 +514,6 @@ final class MapViewModel: ObservableObject {
         var duration: String
     }
 
-    /// Default region: Helsinki.
     @Published var region: MKCoordinateRegion = MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 60.1699, longitude: 24.9384),
         span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
@@ -449,9 +526,7 @@ final class MapViewModel: ObservableObject {
     private let recentsKey = "audipad.map.recentDestinations.v1"
     private let recentsLimit = 8
 
-    init() {
-        loadRecents()
-    }
+    init() { loadRecents() }
 
     // MARK: Zoom
 
@@ -491,9 +566,7 @@ final class MapViewModel: ObservableObject {
             let response = try await MKLocalSearch(request: req).start()
             guard let destination = response.mapItems.first else { return }
             await calculateRoute(to: destination)
-        } catch {
-            // swallow
-        }
+        } catch {}
     }
 
     private func calculateRoute(to destination: MKMapItem) async {
@@ -519,9 +592,7 @@ final class MapViewModel: ObservableObject {
                                       dy: -rect.size.height * 0.1)
             self.region = MKCoordinateRegion(padded)
             addToRecents(title)
-        } catch {
-            // swallow
-        }
+        } catch {}
     }
 
     func clearRoute() {
@@ -576,26 +647,76 @@ final class MapViewModel: ObservableObject {
     }
 }
 
-// MARK: - MKMapView wrapper
+// MARK: - MKMapView wrapper with 3D + user tracking
 
 private struct MapBackground: UIViewRepresentable {
     @Binding var region: MKCoordinateRegion
     let routePolyline: MKPolyline?
+    let followMode: MapTabView.FollowMode
+    let showsUser: Bool
+    let onUserInteraction: () -> Void
 
     func makeUIView(context: Context) -> MKMapView {
         let map = MKMapView()
         map.delegate = context.coordinator
-        map.showsUserLocation = false
+        map.showsUserLocation = showsUser
         map.pointOfInterestFilter = .excludingAll
         map.overrideUserInterfaceStyle = .dark
+        map.isPitchEnabled = true
+        map.isRotateEnabled = true
         map.setRegion(region, animated: false)
+
+        // Initial 3D camera — slight perspective tilt so it doesn't read as flat
+        let cam = MKMapCamera(
+            lookingAtCenter: region.center,
+            fromDistance: 2500,
+            pitch: followMode.pitch,
+            heading: 0
+        )
+        map.setCamera(cam, animated: false)
+
+        // Detect user gestures so we can drop out of follow modes
+        let pan = UIPanGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.handleUserInteraction))
+        pan.delegate = context.coordinator
+        map.addGestureRecognizer(pan)
+        let pinch = UIPinchGestureRecognizer(target: context.coordinator,
+                                             action: #selector(Coordinator.handleUserInteraction))
+        pinch.delegate = context.coordinator
+        map.addGestureRecognizer(pinch)
+        context.coordinator.onUserInteraction = onUserInteraction
+
         return map
     }
 
     func updateUIView(_ uiView: MKMapView, context: Context) {
-        if regionDiffers(uiView.region, region) {
+        uiView.showsUserLocation = showsUser
+        context.coordinator.onUserInteraction = onUserInteraction
+
+        // Update tracking mode
+        if uiView.userTrackingMode != followMode.trackingMode {
+            uiView.setUserTrackingMode(followMode.trackingMode, animated: true)
+        }
+
+        // Push the new pitch into the camera (smooth animation)
+        let current = uiView.camera
+        if abs(current.pitch - followMode.pitch) > 0.5 {
+            let next = MKMapCamera(
+                lookingAtCenter: current.centerCoordinate,
+                fromDistance: current.altitude,
+                pitch: followMode.pitch,
+                heading: current.heading
+            )
+            uiView.setCamera(next, animated: true)
+        }
+
+        // Region update — only when NOT following the user (otherwise the
+        // tracking mode owns the camera).
+        if followMode == .none && regionDiffers(uiView.region, region) {
             uiView.setRegion(region, animated: true)
         }
+
+        // Overlay refresh
         uiView.removeOverlays(uiView.overlays)
         if let p = routePolyline {
             uiView.addOverlay(p, level: .aboveRoads)
@@ -607,11 +728,26 @@ private struct MapBackground: UIViewRepresentable {
     private func regionDiffers(_ a: MKCoordinateRegion, _ b: MKCoordinateRegion) -> Bool {
         let dLat = abs(a.center.latitude - b.center.latitude)
         let dLon = abs(a.center.longitude - b.center.longitude)
-        let dSpan = abs(a.span.latitudeDelta - b.span.latitudeDelta) + abs(a.span.longitudeDelta - b.span.longitudeDelta)
+        let dSpan = abs(a.span.latitudeDelta - b.span.latitudeDelta)
+                  + abs(a.span.longitudeDelta - b.span.longitudeDelta)
         return dLat > 0.0005 || dLon > 0.0005 || dSpan > 0.0005
     }
 
-    final class Coordinator: NSObject, MKMapViewDelegate {
+    final class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
+        var onUserInteraction: (() -> Void)?
+
+        @objc func handleUserInteraction(_ recognizer: UIGestureRecognizer) {
+            // Drop out of follow on any user-initiated pan/pinch
+            if recognizer.state == .began || recognizer.state == .changed {
+                onUserInteraction?()
+            }
+        }
+
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true   // play nicely with the map's own recognizers
+        }
+
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             if let polyline = overlay as? MKPolyline {
                 let r = MKPolylineRenderer(polyline: polyline)
@@ -629,6 +765,7 @@ private struct MapBackground: UIViewRepresentable {
 struct MapTabView_Previews: PreviewProvider {
     static var previews: some View {
         MapTabView()
+            .environmentObject(LocationService())
             .preferredColorScheme(.dark)
             .previewInterfaceOrientation(.landscapeLeft)
     }
