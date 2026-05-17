@@ -2,8 +2,16 @@ import SwiftUI
 
 struct HomeView: View {
     @EnvironmentObject private var vehicle: VehicleViewModel
+    @EnvironmentObject private var roadLimits: RoadSpeedLimitService
 
-    private let currentSpeedLimit: TrafficSign = .speedLimit(80)
+    /// Live speed-limit overlay sign. Sourced from `RoadSpeedLimitService`
+    /// when a reading is available; nil when no data yet (we'd rather show
+    /// nothing than a wrong number).
+    private var currentSpeedLimit: TrafficSign? {
+        guard let reading = roadLimits.current else { return nil }
+        return .speedLimit(reading.limit)
+    }
+
     private let recentSigns: [TrafficSign] = [
         .speedLimit(80),
         .speedBump,
@@ -60,11 +68,13 @@ struct HomeView: View {
                             .frame(maxWidth: .infinity)
                     }
 
-                    TrafficSignView(sign: currentSpeedLimit)
-                        .frame(width: 70, height: 70)
-                        .shadow(color: .black.opacity(0.7), radius: 10, x: 0, y: 4)
-                        .padding(.top, -8)
-                        .accessibilityLabel("Current speed limit")
+                    if let sign = currentSpeedLimit {
+                        TrafficSignView(sign: sign)
+                            .frame(width: 70, height: 70)
+                            .shadow(color: .black.opacity(0.7), radius: 10, x: 0, y: 4)
+                            .padding(.top, -8)
+                            .accessibilityLabel("Current speed limit")
+                    }
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 42)

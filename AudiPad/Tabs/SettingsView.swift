@@ -6,6 +6,7 @@ struct SettingsView: View {
     @EnvironmentObject private var traffic: TrafficIncidentService
     @EnvironmentObject private var vehicle: VehicleViewModel
     @EnvironmentObject private var cameraService: SpeedCameraService
+    @EnvironmentObject private var roadLimits: RoadSpeedLimitService
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -52,6 +53,12 @@ struct SettingsView: View {
                     label: "Traffic incidents",
                     primary: "\(traffic.incidents.count) active in Finland",
                     secondary: trafficStatusText
+                )
+                Divider().background(SQ5Colors.border)
+                StatusRow(
+                    label: "Speed limit (road data)",
+                    primary: speedLimitPrimaryText,
+                    secondary: speedLimitSecondaryText
                 )
                 Divider().background(SQ5Colors.border)
                 StatusRow(
@@ -131,6 +138,24 @@ struct SettingsView: View {
         }
     }
 
+    private var speedLimitPrimaryText: String {
+        guard let r = roadLimits.current else { return "—" }
+        return "\(r.limit) km/h"
+    }
+
+    private var speedLimitSecondaryText: String? {
+        guard let r = roadLimits.current else {
+            if let err = roadLimits.lastError { return "fetch failed: \(err)" }
+            return "waiting for first fetch"
+        }
+        var parts: [String] = ["source: \(r.source.rawValue)"]
+        if r.appliedSeasonalAdjustment {
+            parts.append("winter adjustment applied")
+        }
+        parts.append("at " + r.timestamp.formatted(date: .omitted, time: .shortened))
+        return parts.joined(separator: " · ")
+    }
+
     private var trafficStatusText: String? {
         let user = location.location?.coordinate ?? vehicle.snapshot.coordinate
         let here = CLLocation(latitude: user.latitude, longitude: user.longitude)
@@ -208,5 +233,6 @@ struct SettingsView_Previews: PreviewProvider {
             .environmentObject(TrafficIncidentService())
             .environmentObject(VehicleViewModel())
             .environmentObject(SpeedCameraService())
+            .environmentObject(RoadSpeedLimitService())
     }
 }

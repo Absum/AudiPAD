@@ -12,6 +12,7 @@ struct ContentView: View {
     @StateObject private var locationService = LocationService()
     @StateObject private var traffic = TrafficIncidentService()
     @StateObject private var trafficMonitor = TrafficIncidentMonitor()
+    @StateObject private var roadLimits = RoadSpeedLimitService()
 
     var body: some View {
         HStack(spacing: 0) {
@@ -69,6 +70,7 @@ struct ContentView: View {
         .environmentObject(locationService)
         .environmentObject(traffic)
         .environmentObject(cameraService)
+        .environmentObject(roadLimits)
         .background(SQ5Colors.background.ignoresSafeArea())
         .onAppear {
             traffic.start(movingProvider: { [weak vehicle] in
@@ -81,10 +83,14 @@ struct ContentView: View {
                 // bench without location permission.
                 locationService?.location?.coordinate ?? vehicle?.snapshot.coordinate
             })
+            roadLimits.start(coordProvider: { [weak locationService, weak vehicle] in
+                locationService?.location?.coordinate ?? vehicle?.snapshot.coordinate
+            })
         }
         .onDisappear {
             traffic.stop()
             cameraService.stop()
+            roadLimits.stop()
         }
         .onReceive(vehicle.$snapshot) { snap in
             cameras.update(cameras: cameraService.cameras, vehicle: snap.coordinate)
