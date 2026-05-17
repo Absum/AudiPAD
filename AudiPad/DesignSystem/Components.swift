@@ -1,52 +1,55 @@
 import SwiftUI
 
-struct KpiTile: View {
-    enum Emphasis { case normal, hero }
-
+/// Flat "instrument cluster" KPI cell — no background, no border. Use inside an
+/// HStack with `KpiDivider` between cells (Audi MMI / VC convention).
+struct KpiCell: View {
     let label: String
     let value: String
     var unit: String? = nil
     var symbol: String? = nil
-    var emphasis: Emphasis = .normal
 
     var body: some View {
-        VStack(alignment: .leading, spacing: emphasis == .hero ? 14 : 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 5) {
                 if let symbol {
                     Image(systemName: symbol)
-                        .font(.system(size: emphasis == .hero ? 12 : 10, weight: .medium))
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(SQ5Colors.textTertiary)
                 }
                 Text(label.uppercased())
                     .font(SQ5Typography.caption)
-                    .tracking(1.5)
+                    .tracking(1.8)
                     .foregroundStyle(SQ5Colors.textTertiary)
             }
 
-            HStack(alignment: .lastTextBaseline, spacing: 6) {
+            HStack(alignment: .lastTextBaseline, spacing: 5) {
                 Text(value)
-                    .font(emphasis == .hero ? SQ5Typography.displayMid : SQ5Typography.title)
+                    .font(.system(size: 32, weight: .light, design: .default))
                     .foregroundStyle(SQ5Colors.textPrimary)
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
                 if let unit {
                     Text(unit)
-                        .font(emphasis == .hero ? SQ5Typography.subtitle : SQ5Typography.caption)
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(SQ5Colors.textSecondary)
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(emphasis == .hero ? 22 : 14)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(SQ5Colors.surface)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(SQ5Colors.border, lineWidth: 1)
-                )
-        )
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+    }
+}
+
+/// Thin vertical hairline divider between KPI cells.
+/// Uses the aluminum-aged color at low opacity for an Audi MMI feel.
+struct KpiDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(SQ5Colors.aluminum.opacity(0.18))
+            .frame(width: 1)
+            .padding(.vertical, 10)
     }
 }
 

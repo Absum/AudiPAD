@@ -61,7 +61,7 @@ struct HomeView: View {
                             Image("SQ5Logo")
                                 .resizable()
                                 .aspectRatio(contentMode: .fit)
-                                .frame(height: 34)
+                                .frame(height: 48)
                         }
 
                         SQ5Gauge(value: 2400,
@@ -87,20 +87,32 @@ struct HomeView: View {
                 // Recently detected signs
                 RecentSignsStrip(signs: recentSigns, size: 42)
                     .padding(.horizontal, 26)
-                    .padding(.bottom, 12)
+                    .padding(.bottom, 28)
 
-                // Driver-focused KPI strip
-                HStack(spacing: 10) {
-                    KpiTile(label: "Range",   value: "624", unit: "km",
-                            symbol: "fuelpump")
-                    KpiTile(label: "Avg",     value: "8.2", unit: "L/100",
-                            symbol: "chart.bar")
-                    KpiTile(label: "Now",     value: "6.7", unit: "L/100",
-                            symbol: "drop.fill")
-                    KpiTile(label: "Gear",    value: "D5",
-                            symbol: "gearshift.layout.sixspeed")
-                    KpiTile(label: "Coolant", value: "92",  unit: "°C",
-                            symbol: "thermometer.medium")
+                // Driver-focused KPI strip — flat cells separated by hairlines,
+                // top hairline marks the section (Audi MMI / VC convention).
+                VStack(spacing: 0) {
+                    Rectangle()
+                        .fill(SQ5Colors.aluminum.opacity(0.22))
+                        .frame(height: 1)
+                        .padding(.horizontal, 14)
+
+                    HStack(spacing: 0) {
+                        KpiCell(label: "Range",   value: "624", unit: "km",
+                                symbol: "fuelpump")
+                        KpiDivider()
+                        KpiCell(label: "Avg",     value: "8.2", unit: "L/100",
+                                symbol: "chart.bar")
+                        KpiDivider()
+                        KpiCell(label: "Now",     value: "6.7", unit: "L/100",
+                                symbol: "drop.fill")
+                        KpiDivider()
+                        KpiCell(label: "Gear",    value: "D5",
+                                symbol: "gearshift.layout.sixspeed")
+                        KpiDivider()
+                        KpiCell(label: "Coolant", value: "92",  unit: "°C",
+                                symbol: "thermometer.medium")
+                    }
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 22)
