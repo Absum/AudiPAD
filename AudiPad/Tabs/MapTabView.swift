@@ -695,6 +695,7 @@ private struct MapBackground: UIViewRepresentable {
         let map = MKMapView()
         map.delegate = context.coordinator
         map.showsUserLocation = showsUser
+        map.showsTraffic = true                    // live congestion color from Apple Maps
         map.pointOfInterestFilter = .excludingAll
         map.overrideUserInterfaceStyle = .dark
         map.isPitchEnabled = true
