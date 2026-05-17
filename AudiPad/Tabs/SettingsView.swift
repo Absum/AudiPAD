@@ -9,6 +9,7 @@ struct SettingsView: View {
     @EnvironmentObject private var roadLimits: RoadSpeedLimitService
 
     @AppStorage(AlertAudio.enabledDefaultsKey) private var audioAlertsEnabled = true
+    @AppStorage(SpeedSource.defaultsKey) private var speedSourceRaw: String = SpeedSource.gps.rawValue
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -96,6 +97,29 @@ struct SettingsView: View {
                     Toggle("", isOn: $audioAlertsEnabled)
                         .labelsHidden()
                         .tint(SQ5Colors.accent)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                Divider().background(SQ5Colors.border)
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Speed source")
+                            .font(SQ5Typography.body)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                        Text("OBD-II available post-jailbreak via ELM327")
+                            .font(SQ5Typography.caption)
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                    }
+                    Spacer()
+                    Picker("", selection: $speedSourceRaw) {
+                        ForEach(SpeedSource.allCases) { src in
+                            Text(src.displayLabel).tag(src.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 180)
+                    .tint(SQ5Colors.accent)
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 14)

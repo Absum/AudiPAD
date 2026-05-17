@@ -14,6 +14,7 @@ struct ContentView: View {
     @StateObject private var trafficMonitor = TrafficIncidentMonitor()
     @StateObject private var roadLimits = RoadSpeedLimitService()
     @StateObject private var alertAudio = AlertAudio()
+    @StateObject private var signHistory = SignHistoryService()
 
     var body: some View {
         HStack(spacing: 0) {
@@ -62,8 +63,12 @@ struct ContentView: View {
         .environmentObject(traffic)
         .environmentObject(cameraService)
         .environmentObject(roadLimits)
+        .environmentObject(signHistory)
         .background(SQ5Colors.background.ignoresSafeArea())
         .onAppear {
+            // Kick the location stack — without this, GPS stays dormant and
+            // every consumer below falls back to the simulated vehicle coord.
+            locationService.requestPermission()
             traffic.start(movingProvider: { [weak vehicle] in
                 guard let vehicle else { return false }
                 return vehicle.snapshot.speedKph > 5
@@ -77,6 +82,7 @@ struct ContentView: View {
             roadLimits.start(coordProvider: { [weak locationService, weak vehicle] in
                 locationService?.location?.coordinate ?? vehicle?.snapshot.coordinate
             })
+            signHistory.subscribe(to: roadLimits.$current)
         }
         .onDisappear {
             traffic.stop()
@@ -84,12 +90,23 @@ struct ContentView: View {
             roadLimits.stop()
         }
         .onReceive(vehicle.$snapshot) { snap in
-            cameras.update(cameras: cameraService.cameras, vehicle: snap.coordinate)
+            // Traffic uses a 20 km radius so mock-vs-GPS is forgiving; the
+            // monitor still works on the bench. Camera approach detection,
+            // by contrast, is GPS-only — see the location.$location handler.
             trafficMonitor.update(incidents: traffic.incidents,
                                   userLocation: snap.coordinate)
         }
+        .onReceive(locationService.$location) { loc in
+            // Camera approach: only evaluate against a real GPS fix. No fix
+            // → no banner. Avoids the bench-time false alerts that the
+            // simulated vehicle coord used to cause when it sat next to an
+            // OSM camera.
+            guard let coord = loc?.coordinate else { return }
+            cameras.update(cameras: cameraService.cameras, vehicle: coord)
+        }
         .onReceive(cameraService.$cameras) { latest in
-            cameras.update(cameras: latest, vehicle: vehicle.snapshot.coordinate)
+            guard let coord = locationService.location?.coordinate else { return }
+            cameras.update(cameras: latest, vehicle: coord)
         }
         .onReceive(traffic.$incidents) { incidents in
             trafficMonitor.update(incidents: incidents,

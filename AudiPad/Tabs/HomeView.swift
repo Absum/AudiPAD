@@ -3,6 +3,11 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject private var vehicle: VehicleViewModel
     @EnvironmentObject private var roadLimits: RoadSpeedLimitService
+    @EnvironmentObject private var location: LocationService
+    @EnvironmentObject private var signHistory: SignHistoryService
+
+    @AppStorage(SpeedSource.defaultsKey) private var speedSourceRaw: String = SpeedSource.gps.rawValue
+    private var speedSource: SpeedSource { SpeedSource(rawValue: speedSourceRaw) ?? .gps }
 
     /// Live speed-limit overlay sign. Sourced from `RoadSpeedLimitService`
     /// when a reading is available; nil when no data yet (we'd rather show
@@ -12,12 +17,19 @@ struct HomeView: View {
         return .speedLimit(reading.limit)
     }
 
-    private let recentSigns: [TrafficSign] = [
-        .speedLimit(80),
-        .speedBump,
-        .stop,
-        .speedLimit(50)
-    ]
+    /// Resolves the active speed source. CLLocation.speed is -1 when the
+    /// fix doesn't include speed (initial fixes, sim without route), so we
+    /// clamp to 0 rather than letting a negative leak into the gauge.
+    private var currentSpeedKph: Double {
+        switch speedSource {
+        case .gps:
+            guard let s = location.location?.speed, s >= 0 else { return 0 }
+            return s * 3.6
+        case .obd:
+            return vehicle.snapshot.speedKph
+        }
+    }
+
 
     var body: some View {
         // `ZStack(alignment: .top)` pins the VStack to the top of the screen — without
@@ -32,7 +44,7 @@ struct HomeView: View {
                 // and the speed-limit sign centered above the whole cluster.
                 ZStack(alignment: .top) {
                     HStack(spacing: 14) {
-                        SQ5Gauge(value: vehicle.snapshot.speedKph,
+                        SQ5Gauge(value: currentSpeedKph,
                                  minValue: 0,
                                  maxValue: 240,
                                  label: "Speed",
@@ -80,10 +92,14 @@ struct HomeView: View {
                 .padding(.top, 42)
                 .padding(.bottom, 6)
 
-                // Recently detected signs
-                RecentSignsStrip(signs: recentSigns, size: 42)
-                    .padding(.horizontal, 26)
-                    .padding(.bottom, 28)
+                // Recently detected signs — driven by the rolling history
+                // service (currently only speed limits from RoadSpeedLimit;
+                // other types arrive once TSR is online).
+                if !signHistory.signs.isEmpty {
+                    RecentSignsStrip(signs: signHistory.signs, size: 42)
+                        .padding(.horizontal, 26)
+                        .padding(.bottom, 28)
+                }
 
                 // Driver-focused KPI strip — flat cells separated by hairlines,
                 // top hairline marks the section (Audi MMI / VC convention).
