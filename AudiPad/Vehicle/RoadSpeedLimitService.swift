@@ -125,9 +125,13 @@ final class RoadSpeedLimitService: ObservableObject {
     }
 
     private func fetchOSM(around coord: CLLocationCoordinate2D) async {
+        // Drop the `maxspeed` filter: we want road name + ref even on
+        // streets without a tagged limit (e.g. residential lanes where
+        // Digiroad supplies the limit but OSM has none). Speed-limit
+        // selection still filters in-code for ways that *do* have it.
         let query = """
         [out:json][timeout:15];
-        way["highway"]["maxspeed"](around:200,\(coord.latitude),\(coord.longitude));
+        way["highway"](around:200,\(coord.latitude),\(coord.longitude));
         out tags geom;
         """
         guard var components = URLComponents(url: Self.osmEndpoint, resolvingAgainstBaseURL: false) else { return }
@@ -150,19 +154,34 @@ final class RoadSpeedLimitService: ObservableObject {
             let userLoc = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
             lastOSMQueriedCoord = coord
 
-            let nearest = payload.elements
-                .compactMap { way -> (way: OverpassWay, limit: Int, dist: CLLocationDistance)? in
+            // Road identity: pick the absolute nearest highway way (whether
+            // or not it has maxspeed), so the bottom-of-map road panel
+            // populates on residential streets too.
+            let nearestRoad = payload.elements
+                .map { way in (way, Self.nearestVertexDistance(way, to: userLoc)) }
+                .min(by: { $0.1 < $1.1 })
+            if let nr = nearestRoad {
+                let tags = nr.0.tags ?? [:]
+                let newRoad = RoadInfo(name: tags["name"],
+                                       ref: tags["ref"] ?? tags["int_ref"])
+                if newRoad != currentRoad { currentRoad = newRoad }
+            } else {
+                if currentRoad != nil { currentRoad = nil }
+            }
+
+            // Speed limit: must come from a way that actually has the tag.
+            let nearestWithLimit = payload.elements
+                .compactMap { way -> (limit: Int, dist: CLLocationDistance)? in
                     guard let raw = way.tags?["maxspeed"],
                           let limit = Self.parseMaxspeed(raw)
                     else { return nil }
                     let d = Self.nearestVertexDistance(way, to: userLoc)
-                    return (way, limit, d)
+                    return (limit, d)
                 }
                 .min(by: { $0.dist < $1.dist })
 
-            guard let n = nearest else {
+            guard let n = nearestWithLimit else {
                 osmReading = nil
-                currentRoad = nil
                 lastError = nil
                 updateCurrent()
                 return
@@ -174,12 +193,6 @@ final class RoadSpeedLimitService: ObservableObject {
                                  source: .osm,
                                  appliedSeasonalAdjustment: adjusted,
                                  timestamp: now)
-            // Publish the road's identity from the same nearest way, falling
-            // back to nil rather than fabricating when tags are absent.
-            let tags = n.way.tags ?? [:]
-            let newRoad = RoadInfo(name: tags["name"],
-                                   ref: tags["ref"] ?? tags["int_ref"])
-            if newRoad != currentRoad { currentRoad = newRoad }
             lastError = nil
             updateCurrent()
         } catch let decoding as DecodingError {

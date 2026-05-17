@@ -4,15 +4,20 @@ struct MediaView: View {
     @EnvironmentObject private var vehicle: VehicleViewModel
 
     var body: some View {
-        ZStack(alignment: .top) {
+        ZStack {
             SQ5Colors.background.ignoresSafeArea()
 
             VStack(spacing: 0) {
                 TopBar(fuelPercent: vehicle.snapshot.fuelPercent, showSpeed: true)
                 Spacer()
+                content
+                Spacer()
             }
+        }
+    }
 
-            HStack(spacing: 48) {
+    private var content: some View {
+        HStack(spacing: 48) {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .fill(SQ5Colors.surfaceElevated)
                     .frame(width: 240, height: 240)
@@ -38,7 +43,6 @@ struct MediaView: View {
                         TransportButton(symbol: "forward.fill", size: 26)
                     }
                 }
-            }
         }
     }
 }

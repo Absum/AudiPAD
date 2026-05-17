@@ -149,10 +149,12 @@ private enum AlertPlacement {
         }
     }
 
-    /// Top padding applied for `.top` placement — clears TopBar + search field.
+    /// Top padding applied for `.top` placement — clears TopBar + search
+    /// field with a comfortable gap so the banner doesn't feel glued to
+    /// the search row.
     var topPadding: CGFloat {
         switch self {
-        case .top:    return 120
+        case .top:    return 140
         case .bottom: return 0
         }
     }

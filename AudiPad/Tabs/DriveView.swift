@@ -2,6 +2,20 @@ import SwiftUI
 
 struct DriveView: View {
     @EnvironmentObject private var vehicle: VehicleViewModel
+    @EnvironmentObject private var location: LocationService
+
+    @AppStorage(SpeedSource.defaultsKey) private var speedSourceRaw: String = SpeedSource.gps.rawValue
+
+    /// Same GPS/OBD logic as HomeView's hero gauge — keep them in sync.
+    private var currentSpeedKph: Double {
+        switch SpeedSource(rawValue: speedSourceRaw) ?? .gps {
+        case .gps:
+            guard let s = location.location?.speed, s >= 0 else { return 0 }
+            return s * 3.6
+        case .obd:
+            return vehicle.snapshot.speedKph
+        }
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -56,7 +70,7 @@ struct DriveView: View {
                     ReadingCell(label: "RPM",
                                 value: "\(Int(vehicle.snapshot.rpm.rounded()))")
                     ReadingCell(label: "Speed",
-                                value: "\(Int(vehicle.snapshot.speedKph.rounded()))",
+                                value: "\(Int(currentSpeedKph.rounded()))",
                                 unit: "km/h")
                     ReadingCell(label: "Gear",
                                 value: vehicle.snapshot.gear)

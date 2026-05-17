@@ -54,25 +54,22 @@ struct TopBar: View {
     }
 }
 
+/// Plain-text speed readout sized to sit beside the clock without
+/// adding visual weight. Matches the clock's font + tracking so the
+/// two read as siblings rather than competing chrome.
 private struct SpeedPill: View {
     let kph: Double
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 4) {
             Text("\(Int(kph.rounded()))")
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(SQ5Colors.textPrimary)
+                .font(.system(size: 24, weight: .medium))
+                .foregroundStyle(SQ5Colors.textSecondary)
                 .monospacedDigit()
             Text("km/h")
                 .font(.system(size: 11, weight: .medium))
                 .tracking(0.5)
                 .foregroundStyle(SQ5Colors.textTertiary)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 4)
-        .background(
-            Capsule().fill(SQ5Colors.surface.opacity(0.7))
-                .overlay(Capsule().stroke(SQ5Colors.border, lineWidth: 1))
-        )
     }
 }
