@@ -67,7 +67,7 @@ struct HomeView: View {
                         .accessibilityLabel("Current speed limit")
                 }
                 .padding(.horizontal, 20)
-                .padding(.top, 48)
+                .padding(.top, 42)
                 .padding(.bottom, 6)
 
                 // Recently detected signs
