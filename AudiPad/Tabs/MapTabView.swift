@@ -14,8 +14,11 @@ struct MapTabView: View {
     @FocusState private var searchFocused: Bool
 
     /// Map's current following behavior. Drives both `MKUserTrackingMode`
-    /// and the camera pitch.
-    @State private var followMode: FollowMode = .none
+    /// and the camera pitch. Defaults to `.follow` so opening the Map tab
+    /// snaps to the user's GPS position; any pan/pinch flips it back to
+    /// `.none` via `onUserInteraction` so the driver can browse without
+    /// fighting the re-centering.
+    @State private var followMode: FollowMode = .follow
 
     enum FollowMode {
         case none           // free pan/zoom

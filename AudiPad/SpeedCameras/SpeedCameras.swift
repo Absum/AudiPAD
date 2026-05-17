@@ -80,6 +80,13 @@ final class SpeedCameraMonitor: ObservableObject {
 
     @Published private(set) var nearestApproaching: Approaching?
 
+    /// Once a camera passes the entry gates and becomes `nearestApproaching`,
+    /// we keep showing it until distance > alertRadius — even after the user
+    /// drives past (bearing flips → entry heading gate would suppress).
+    /// Avoids both the "banner disappears the moment you pass" complaint and
+    /// the "distance number flips between candidates" complaint.
+    private var stickyCameraID: UUID?
+
     init(alertRadiusMeters: CLLocationDistance = 1000,
          minSpeedKph: Double = 5,
          approachHalfConeDeg: Double = 45,
@@ -104,6 +111,28 @@ final class SpeedCameraMonitor: ObservableObject {
     func update(cameras: [SpeedCamera],
                 userLocation loc: CLLocation,
                 linkID: ((CLLocationCoordinate2D) -> String?)? = nil) {
+
+        // Sticky continuation: if we're already alerting a camera, keep
+        // showing it (with the live distance) until we leave the radius.
+        // The driver has been notified — they need the distance to count
+        // down through zero and a moment past, not vanish mid-approach.
+        if let stickyID = stickyCameraID,
+           let stuck = cameras.first(where: { $0.id == stickyID }) {
+            let camLoc = CLLocation(latitude: stuck.coordinate.latitude,
+                                    longitude: stuck.coordinate.longitude)
+            let dist = loc.distance(from: camLoc)
+            if dist <= alertRadiusMeters {
+                let next = Approaching(camera: stuck, distanceMeters: dist)
+                if next != nearestApproaching { nearestApproaching = next }
+                return
+            }
+            // Out of radius → driver has cleared the camera. Drop sticky
+            // and fall through to entry-gate evaluation for the next one.
+            stickyCameraID = nil
+        }
+
+        // Entry gates — all must pass for a *new* camera to start alerting.
+
         // Speed gate. CLLocation.speed is m/s; -1 when invalid.
         let speedKph = max(0, loc.speed) * 3.6
         guard speedKph >= minSpeedKph else {
@@ -168,6 +197,9 @@ final class SpeedCameraMonitor: ObservableObject {
         if next != nearestApproaching {
             nearestApproaching = next
         }
+        // Engage stickiness as soon as a camera enters the alert state, so
+        // the next .update keeps showing it past the heading flip.
+        stickyCameraID = nearest?.0.id
     }
 
     // MARK: - Geometry helpers
