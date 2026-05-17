@@ -1,4 +1,5 @@
 import Foundation
+import CoreLocation
 
 /// Immutable snapshot of vehicle state at a single instant.
 /// Populated either by the mock simulator (today) or by a real
@@ -27,6 +28,14 @@ struct OBDSnapshot: Equatable, Sendable {
     var avgConsumption: Double    // trip avg, L/100 km
     var nowConsumption: Double    // instantaneous, L/100 km
 
+    // Location (lat/lon) — comes from CL on real device, simulated on bench
+    var latitude: Double
+    var longitude: Double
+
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+
     /// Sensible placeholder used before the first real snapshot arrives.
     static let placeholder = OBDSnapshot(
         timestamp: Date(),
@@ -41,6 +50,8 @@ struct OBDSnapshot: Equatable, Sendable {
         fuelPercent: 65,
         rangeKm: 600,
         avgConsumption: 8.2,
-        nowConsumption: 0
+        nowConsumption: 0,
+        latitude: 60.1699,
+        longitude: 24.9384
     )
 }

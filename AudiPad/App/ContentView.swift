@@ -3,22 +3,44 @@ import SwiftUI
 struct ContentView: View {
     @State private var selectedTab: AppTab = .home
 
+    /// Shared across all tabs so data is consistent + so cross-cutting
+    /// features (speed camera monitor) can subscribe to one source.
+    @StateObject private var vehicle = VehicleViewModel()
+    @StateObject private var cameras = SpeedCameraMonitor()
+
     var body: some View {
         HStack(spacing: 0) {
             NavRail(selection: $selectedTab)
 
-            Group {
-                switch selectedTab {
-                case .home:     HomeView()
-                case .drive:    DriveView()
-                case .map:      MapTabView()
-                case .media:    MediaView()
-                case .settings: SettingsView()
+            ZStack(alignment: .top) {
+                Group {
+                    switch selectedTab {
+                    case .home:     HomeView()
+                    case .drive:    DriveView()
+                    case .map:      MapTabView()
+                    case .media:    MediaView()
+                    case .settings: SettingsView()
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                // Cross-cutting speed-camera alert. Mounted at the
+                // ContentView level so it's visible regardless of selected tab.
+                if let approach = cameras.nearestApproaching {
+                    SpeedCameraAlertBanner(approach: approach)
+                        .padding(.horizontal, 24)
+                        .padding(.top, 76)   // sits just under the TopBar row
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .zIndex(10)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .animation(.easeOut(duration: 0.3), value: cameras.nearestApproaching != nil)
         }
+        .environmentObject(vehicle)
         .background(SQ5Colors.background.ignoresSafeArea())
+        .onReceive(vehicle.$snapshot) { snap in
+            cameras.update(vehicle: snap.coordinate)
+        }
     }
 }
 

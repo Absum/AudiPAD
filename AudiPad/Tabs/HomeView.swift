@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct HomeView: View {
-    @StateObject private var vehicle = VehicleViewModel()
+    @EnvironmentObject private var vehicle: VehicleViewModel
 
     private let currentSpeedLimit: TrafficSign = .speedLimit(80)
     private let recentSigns: [TrafficSign] = [
@@ -111,7 +111,6 @@ struct HomeView: View {
             }
         }
         .onAppear { vehicle.start() }
-        .onDisappear { vehicle.stop() }
     }
 }
 

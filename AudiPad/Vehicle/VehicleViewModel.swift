@@ -44,6 +44,11 @@ actor DrivingSimulator {
     private let tankLiters: Double = 75        // SQ5 tank capacity
     private var avgConsumption: Double = 8.2   // L/100 km, slow-drifting
 
+    // Location state — start a bit south-east of the first mock speed
+    // camera so the alert visibly triggers shortly after launch.
+    private var lat: Double = 60.1690
+    private var lon: Double = 24.9380
+
     /// Produce the next snapshot, advancing internal state by `dt` seconds.
     func tick(dt: Double) -> OBDSnapshot {
         t += dt
@@ -100,6 +105,16 @@ actor DrivingSimulator {
         let fuelPct = (fuelLiters / tankLiters) * 100.0
         let rangeKm = fuelLiters * (100.0 / max(1.0, avgConsumption))
 
+        // ── Location — advance lat/lon based on speed + heading ─────────────
+        // Heading sweeps slowly so the simulated route wanders the area.
+        let heading = sin(t / 35.0) * .pi              // -π … π
+        let speedMs = speedKph / 3.6
+        let distanceM = speedMs * dt
+        let metersPerLatDeg = 111_000.0
+        let metersPerLonDeg = 111_000.0 * cos(lat * .pi / 180)
+        lat += (distanceM * cos(heading)) / metersPerLatDeg
+        lon += (distanceM * sin(heading)) / metersPerLonDeg
+
         return OBDSnapshot(
             timestamp: Date(),
             speedKph: speedKph,
@@ -113,7 +128,9 @@ actor DrivingSimulator {
             fuelPercent: fuelPct,
             rangeKm: rangeKm,
             avgConsumption: avgConsumption,
-            nowConsumption: nowLp100
+            nowConsumption: nowLp100,
+            latitude: lat,
+            longitude: lon
         )
     }
 }

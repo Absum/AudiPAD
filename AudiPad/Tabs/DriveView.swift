@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct DriveView: View {
-    @StateObject private var vehicle = VehicleViewModel()
+    @EnvironmentObject private var vehicle: VehicleViewModel
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -96,7 +96,6 @@ struct DriveView: View {
             }
         }
         .onAppear { vehicle.start() }
-        .onDisappear { vehicle.stop() }
     }
 }
 
