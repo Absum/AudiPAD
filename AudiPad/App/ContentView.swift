@@ -19,52 +19,42 @@ struct ContentView: View {
         HStack(spacing: 0) {
             NavRail(selection: $selectedTab)
 
-            ZStack {
-                Group {
-                    switch selectedTab {
-                    case .home:     HomeView()
-                    case .drive:    DriveView()
-                    case .map:      MapTabView()
-                    case .media:    MediaView()
-                    case .settings: SettingsView()
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                // Cross-cutting alert overlay. Camera alerts take priority
-                // (they're immediately safety-relevant); traffic incidents
-                // surface when no camera alert is active.
-                if let approach = cameras.nearestApproaching {
-                    let placement = AlertPlacement.for(tab: selectedTab)
-                    SpeedCameraAlertBanner(approach: approach)
-                        .padding(.horizontal, 24)
-                        .padding(.top, placement.topPadding)
-                        .padding(.bottom, placement.bottomPadding)
-                        .frame(maxWidth: .infinity,
-                               maxHeight: .infinity,
-                               alignment: placement.alignment)
-                        .allowsHitTesting(false)
-                        .transition(.move(edge: placement.transitionEdge)
-                                    .combined(with: .opacity))
-                        .zIndex(10)
-                } else if let incident = trafficMonitor.severeNearby {
-                    let placement = AlertPlacement.for(tab: selectedTab)
-                    TrafficAlertBanner(incident: incident,
-                                       distanceMeters: trafficMonitor.severeDistanceMeters)
-                        .padding(.horizontal, 24)
-                        .padding(.top, placement.topPadding)
-                        .padding(.bottom, placement.bottomPadding)
-                        .frame(maxWidth: .infinity,
-                               maxHeight: .infinity,
-                               alignment: placement.alignment)
-                        .allowsHitTesting(false)
-                        .transition(.move(edge: placement.transitionEdge)
-                                    .combined(with: .opacity))
-                        .zIndex(9)
+            let placement = AlertPlacement.for(tab: selectedTab)
+            Group {
+                switch selectedTab {
+                case .home:     HomeView()
+                case .drive:    DriveView()
+                case .map:      MapTabView()
+                case .media:    MediaView()
+                case .settings: SettingsView()
                 }
             }
-            .animation(.easeOut(duration: 0.3), value: cameras.nearestApproaching != nil)
-            .animation(.easeOut(duration: 0.3), value: trafficMonitor.severeNearby != nil)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Alert as a content overlay — its frame is just the banner
+            // size + padding, so it doesn't blanket the tab and steal
+            // touches from interactive content (toggles, search, etc.).
+            // Camera alerts take priority; traffic incidents surface when
+            // no camera alert is active.
+            .overlay(alignment: placement.alignment) {
+                Group {
+                    if let approach = cameras.nearestApproaching {
+                        SpeedCameraAlertBanner(approach: approach)
+                            .transition(.move(edge: placement.transitionEdge)
+                                        .combined(with: .opacity))
+                    } else if let incident = trafficMonitor.severeNearby {
+                        TrafficAlertBanner(incident: incident,
+                                           distanceMeters: trafficMonitor.severeDistanceMeters)
+                            .transition(.move(edge: placement.transitionEdge)
+                                        .combined(with: .opacity))
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, placement.topPadding)
+                .padding(.bottom, placement.bottomPadding)
+                .allowsHitTesting(false)
+                .animation(.easeOut(duration: 0.3), value: cameras.nearestApproaching != nil)
+                .animation(.easeOut(duration: 0.3), value: trafficMonitor.severeNearby != nil)
+            }
             .animation(.easeInOut(duration: 0.25), value: selectedTab)
         }
         .environmentObject(vehicle)
