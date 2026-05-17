@@ -52,11 +52,13 @@ struct SQ5Gauge: View {
             let arcDiameter = side * 0.86
 
             ZStack {
-                // Background arc
+                // Background arc — sharp (butt) caps for parity with the active
+                // arc; round caps read as soft / unprofessional next to the
+                // perpendicular tip of the fill.
                 Circle()
                     .trim(from: 0, to: 0.75)
                     .stroke(SQ5Colors.border,
-                            style: StrokeStyle(lineWidth: strokeWidth, lineCap: .round))
+                            style: StrokeStyle(lineWidth: strokeWidth, lineCap: .butt))
                     .rotationEffect(.degrees(135))
                     .frame(width: arcDiameter, height: arcDiameter)
 
