@@ -6,20 +6,30 @@ struct KpiTile: View {
     let label: String
     let value: String
     var unit: String? = nil
+    var symbol: String? = nil
     var emphasis: Emphasis = .normal
 
     var body: some View {
-        VStack(alignment: .leading, spacing: emphasis == .hero ? 14 : 4) {
-            Text(label.uppercased())
-                .font(SQ5Typography.caption)
-                .tracking(1.5)
-                .foregroundStyle(SQ5Colors.textTertiary)
+        VStack(alignment: .leading, spacing: emphasis == .hero ? 14 : 6) {
+            HStack(spacing: 5) {
+                if let symbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: emphasis == .hero ? 12 : 10, weight: .medium))
+                        .foregroundStyle(SQ5Colors.textTertiary)
+                }
+                Text(label.uppercased())
+                    .font(SQ5Typography.caption)
+                    .tracking(1.5)
+                    .foregroundStyle(SQ5Colors.textTertiary)
+            }
 
             HStack(alignment: .lastTextBaseline, spacing: 6) {
                 Text(value)
                     .font(emphasis == .hero ? SQ5Typography.displayMid : SQ5Typography.title)
                     .foregroundStyle(SQ5Colors.textPrimary)
                     .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
                 if let unit {
                     Text(unit)
                         .font(emphasis == .hero ? SQ5Typography.subtitle : SQ5Typography.caption)
@@ -76,10 +86,9 @@ struct BrandBar: View {
 
             Spacer()
 
-            // Status pills
             HStack(spacing: 14) {
                 StatusPill(symbol: "thermometer.medium", value: "23°", caption: "AIR")
-                StatusPill(symbol: "fuelpump.fill", value: "65%", caption: "FUEL")
+                StatusPill(symbol: "fuelpump.fill",      value: "65%", caption: "FUEL")
                 Text(Date().formatted(date: .omitted, time: .shortened))
                     .font(SQ5Typography.subtitle)
                     .foregroundStyle(SQ5Colors.textSecondary)
