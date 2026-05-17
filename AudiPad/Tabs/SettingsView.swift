@@ -8,6 +8,8 @@ struct SettingsView: View {
     @EnvironmentObject private var cameraService: SpeedCameraService
     @EnvironmentObject private var roadLimits: RoadSpeedLimitService
 
+    @AppStorage(AlertAudio.enabledDefaultsKey) private var audioAlertsEnabled = true
+
     var body: some View {
         ZStack(alignment: .top) {
             SQ5Colors.background.ignoresSafeArea()
@@ -86,6 +88,18 @@ struct SettingsView: View {
                 .padding(.bottom, 12)
 
             VStack(spacing: 0) {
+                HStack {
+                    Text("Audio alerts")
+                        .font(SQ5Typography.body)
+                        .foregroundStyle(SQ5Colors.textPrimary)
+                    Spacer()
+                    Toggle("", isOn: $audioAlertsEnabled)
+                        .labelsHidden()
+                        .tint(SQ5Colors.accent)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                Divider().background(SQ5Colors.border)
                 StatusRow(label: "App version", primary: "0.1.0 (1)", secondary: nil)
                 Divider().background(SQ5Colors.border)
                 StatusRow(label: "Display brightness", primary: "Auto", secondary: nil)

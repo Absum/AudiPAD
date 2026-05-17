@@ -13,6 +13,7 @@ struct ContentView: View {
     @StateObject private var traffic = TrafficIncidentService()
     @StateObject private var trafficMonitor = TrafficIncidentMonitor()
     @StateObject private var roadLimits = RoadSpeedLimitService()
+    @StateObject private var alertAudio = AlertAudio()
 
     var body: some View {
         HStack(spacing: 0) {
@@ -103,6 +104,10 @@ struct ContentView: View {
         .onReceive(traffic.$incidents) { incidents in
             trafficMonitor.update(incidents: incidents,
                                   userLocation: vehicle.snapshot.coordinate)
+        }
+        .onReceive(cameras.$nearestApproaching) { approach in
+            // Fires once per camera-id transition, no need to debounce here.
+            alertAudio.onSpeedCameraApproach(approach)
         }
     }
 }
