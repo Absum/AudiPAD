@@ -66,43 +66,9 @@ struct SectionHeader: View {
     }
 }
 
-/// Top brand bar — Wordmark (image) + SQ5 accent + clock.
-struct BrandBar: View {
-    var body: some View {
-        HStack(spacing: 16) {
-            Image("Wordmark")
-                .resizable()
-                .renderingMode(.template)
-                .aspectRatio(contentMode: .fit)
-                .frame(height: 24)
-                .foregroundStyle(SQ5Colors.accent)
-
-            Rectangle()
-                .fill(SQ5Colors.aluminum.opacity(0.45))
-                .frame(width: 1, height: 22)
-
-            Text("SQ5")
-                .font(.system(size: 22, weight: .semibold, design: .default))
-                .tracking(4)
-                .foregroundStyle(SQ5Colors.accent)
-
-            Spacer()
-
-            HStack(spacing: 14) {
-                StatusPill(symbol: "thermometer.medium", value: "23°", caption: "AIR")
-                StatusPill(symbol: "fuelpump.fill",      value: "65%", caption: "FUEL")
-                Text(Date().formatted(date: .omitted, time: .shortened))
-                    .font(SQ5Typography.subtitle)
-                    .foregroundStyle(SQ5Colors.textSecondary)
-                    .monospacedDigit()
-            }
-        }
-        .padding(.horizontal, 26)
-        .padding(.vertical, 16)
-    }
-}
-
-private struct StatusPill: View {
+/// Small icon + value + caption pill used for ambient indicators (air temp, fuel, etc.).
+/// Public — used directly in HomeView's top-right status row.
+struct StatusPill: View {
     let symbol: String
     let value: String
     let caption: String

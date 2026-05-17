@@ -15,14 +15,23 @@ struct HomeView: View {
             SQ5Colors.background.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                BrandBar()
+                // Thin top-right status row (no Audi/SQ5 wordmark — that lives in the NavRail)
+                HStack(spacing: 14) {
+                    Spacer()
+                    StatusPill(symbol: "thermometer.medium", value: "23°", caption: "AIR")
+                    StatusPill(symbol: "fuelpump.fill",      value: "65%", caption: "FUEL")
+                    Text(Date().formatted(date: .omitted, time: .shortened))
+                        .font(SQ5Typography.subtitle)
+                        .foregroundStyle(SQ5Colors.textSecondary)
+                        .monospacedDigit()
+                }
+                .padding(.horizontal, 26)
+                .padding(.top, 18)
+                .padding(.bottom, 8)
 
-                Rectangle()
-                    .fill(SQ5Colors.border)
-                    .frame(height: 1)
-
-                // Hero gauges with small Boost gauge in between (Audi S-line cluster style)
-                // and the speed-limit sign centered above the whole cluster.
+                // Gauge cluster (Audi-S line: large outer + small center boost), with the
+                // current speed-limit sign centered above and the "SQ5" brand mark below
+                // the boost gauge.
                 ZStack(alignment: .top) {
                     HStack(spacing: 14) {
                         SQ5Gauge(value: 87,
@@ -33,17 +42,27 @@ struct HomeView: View {
                                  majorStep: 20)
                             .frame(maxWidth: .infinity)
 
-                        // Small boost gauge (3.0 TDI biturbo: ~0–2.5 bar, redline ~2.0)
-                        SQ5Gauge(value: 1.4,
-                                 minValue: 0,
-                                 maxValue: 2.5,
-                                 label: "Boost",
-                                 unit: "bar",
-                                 redlineStart: 2.0,
-                                 majorStep: 0.5,
-                                 minorBetween: 1,
-                                 formatter: { String(format: "%.1f", $0) })
-                            .frame(width: 210)
+                        VStack(spacing: 18) {
+                            // Boost (CGQB 3.0 V6 BiTDI, stock):
+                            // peak ~1.9–2.2 bar absolute (≈ 0.9–1.2 bar gauge/relative).
+                            // Range 0–2.5 absolute with redline at 2.0; OBD reports
+                            // absolute, so this matches what the live PID will feed in.
+                            SQ5Gauge(value: 1.8,
+                                     minValue: 0,
+                                     maxValue: 2.5,
+                                     label: "Boost",
+                                     unit: "bar",
+                                     redlineStart: 2.0,
+                                     majorStep: 0.5,
+                                     minorBetween: 1,
+                                     formatter: { String(format: "%.1f", $0) })
+                                .frame(width: 210)
+
+                            Image("SQ5Logo")
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(height: 34)
+                        }
 
                         SQ5Gauge(value: 2400,
                                  minValue: 0,
@@ -55,7 +74,6 @@ struct HomeView: View {
                             .frame(maxWidth: .infinity)
                     }
 
-                    // Centered speed-limit sign popping above the cluster top
                     TrafficSignView(sign: currentSpeedLimit)
                         .frame(width: 70, height: 70)
                         .shadow(color: .black.opacity(0.7), radius: 10, x: 0, y: 4)
@@ -63,15 +81,15 @@ struct HomeView: View {
                         .accessibilityLabel("Current speed limit")
                 }
                 .padding(.horizontal, 20)
-                .padding(.top, 18)
+                .padding(.top, 12)
                 .padding(.bottom, 6)
 
                 // Recently detected signs
                 RecentSignsStrip(signs: recentSigns, size: 42)
                     .padding(.horizontal, 26)
-                    .padding(.bottom, 10)
+                    .padding(.bottom, 12)
 
-                // Driver-focused KPI strip (technical/diagnostic stuff lives in the Drive tab)
+                // Driver-focused KPI strip
                 HStack(spacing: 10) {
                     KpiTile(label: "Range",   value: "624", unit: "km",
                             symbol: "fuelpump")
@@ -85,7 +103,7 @@ struct HomeView: View {
                             symbol: "thermometer.medium")
                 }
                 .padding(.horizontal, 20)
-                .padding(.bottom, 18)
+                .padding(.bottom, 22)
             }
         }
     }
