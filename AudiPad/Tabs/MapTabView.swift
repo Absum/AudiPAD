@@ -19,6 +19,8 @@ struct MapTabView: View {
     }
 }
 
-#Preview("Map") {
-    MapTabView().preferredColorScheme(.dark)
+struct MapTabView_Previews: PreviewProvider {
+    static var previews: some View {
+        MapTabView().preferredColorScheme(.dark)
+    }
 }

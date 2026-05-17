@@ -105,7 +105,10 @@ private struct StatusBar: View {
     }
 }
 
-#Preview("Drive — landscape", traits: .landscapeLeft) {
-    DriveView()
-        .preferredColorScheme(.dark)
+struct DriveView_Previews: PreviewProvider {
+    static var previews: some View {
+        DriveView()
+            .preferredColorScheme(.dark)
+            .previewInterfaceOrientation(.landscapeLeft)
+    }
 }

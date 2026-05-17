@@ -34,7 +34,10 @@ struct ContentView: View {
     }
 }
 
-#Preview("ContentView — landscape", traits: .landscapeLeft) {
-    ContentView()
-        .preferredColorScheme(.dark)
+struct ContentView_Previews: PreviewProvider {
+    static var previews: some View {
+        ContentView()
+            .preferredColorScheme(.dark)
+            .previewInterfaceOrientation(.landscapeLeft)
+    }
 }

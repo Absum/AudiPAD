@@ -53,7 +53,10 @@ private struct TransportButton: View {
     }
 }
 
-#Preview("Media — landscape", traits: .landscapeLeft) {
-    MediaView()
-        .preferredColorScheme(.dark)
+struct MediaView_Previews: PreviewProvider {
+    static var previews: some View {
+        MediaView()
+            .preferredColorScheme(.dark)
+            .previewInterfaceOrientation(.landscapeLeft)
+    }
 }

@@ -31,7 +31,10 @@ struct HomeView: View {
     }
 }
 
-#Preview("Home — landscape", traits: .landscapeLeft) {
-    HomeView()
-        .preferredColorScheme(.dark)
+struct HomeView_Previews: PreviewProvider {
+    static var previews: some View {
+        HomeView()
+            .preferredColorScheme(.dark)
+            .previewInterfaceOrientation(.landscapeLeft)
+    }
 }
