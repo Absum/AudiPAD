@@ -36,6 +36,8 @@ struct HomeView: View {
                         // peak ~1.9–2.2 bar absolute (≈ 0.9–1.2 bar gauge/relative).
                         // Range 0–2.5 absolute with redline at 2.0; OBD reports
                         // absolute, so this matches what the live PID will feed in.
+                        // Dropped 20pt down so the gauge top clears the centered
+                        // speed-limit sign overlay.
                         SQ5Gauge(value: vehicle.snapshot.boostBar,
                                  minValue: 0,
                                  maxValue: 2.5,
@@ -46,6 +48,7 @@ struct HomeView: View {
                                  minorBetween: 1,
                                  formatter: { String(format: "%.1f", $0) })
                             .frame(width: 210)
+                            .padding(.top, 20)
 
                         SQ5Gauge(value: vehicle.snapshot.rpm,
                                  minValue: 0,
