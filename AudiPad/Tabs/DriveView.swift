@@ -147,6 +147,8 @@ private struct HeroStat: View {
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
+                    .contentTransition(.numericText())
+                    .animation(.easeOut(duration: 0.35), value: value)
                 Text(unit)
                     .font(SQ5Typography.subtitle)
                     .foregroundStyle(SQ5Colors.textSecondary)
@@ -160,7 +162,8 @@ private struct HeroStat: View {
                     Capsule()
                         .fill(fillColor)
                         .frame(width: max(0, geo.size.width * clamped), height: 3)
-                        .animation(.easeOut(duration: 0.25), value: clamped)
+                        .animation(.easeOut(duration: 0.4), value: clamped)
+                        .animation(.easeInOut(duration: 0.25), value: fillColor)
                 }
             }
             .frame(height: 3)
@@ -190,6 +193,8 @@ private struct ReadingCell: View {
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
+                    .contentTransition(.numericText())
+                    .animation(.easeOut(duration: 0.3), value: value)
                 if let unit {
                     Text(unit)
                         .font(.system(size: 11, weight: .medium))

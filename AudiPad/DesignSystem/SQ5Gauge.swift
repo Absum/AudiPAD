@@ -70,21 +70,23 @@ struct SQ5Gauge: View {
                         .frame(width: arcDiameter, height: arcDiameter)
                 }
 
-                // Active progress arc
+                // Active progress arc — animates fill and color crossfade to accent
+                // when crossing the redline.
                 Circle()
                     .trim(from: 0, to: 0.75 * progress)
                     .stroke(activeArcColor,
                             style: StrokeStyle(lineWidth: strokeWidth, lineCap: .round))
                     .rotationEffect(.degrees(135))
                     .frame(width: arcDiameter, height: arcDiameter)
-                    .animation(.easeOut(duration: 0.25), value: progress)
+                    .animation(.easeOut(duration: 0.4), value: progress)
+                    .animation(.easeInOut(duration: 0.25), value: activeArcColor)
 
                 // Tick marks
                 TickMarks(majorCount: Int(((maxValue - minValue) / resolvedMajorStep).rounded()),
                           minorBetween: minorBetween,
                           diameter: arcDiameter + strokeWidth * 2)
 
-                // Center readout
+                // Center readout — value morphs between numerics instead of snapping.
                 VStack(spacing: side * 0.012) {
                     Text(formatter(value))
                         .font(.system(size: side * 0.24, weight: .light, design: .default))
@@ -92,6 +94,8 @@ struct SQ5Gauge: View {
                         .monospacedDigit()
                         .minimumScaleFactor(0.5)
                         .lineLimit(1)
+                        .contentTransition(.numericText())
+                        .animation(.easeOut(duration: 0.35), value: value)
                     if let unit {
                         Text(unit)
                             .font(.system(size: side * 0.07, weight: .medium))
