@@ -15,9 +15,9 @@ struct KpiTile: View {
                 .tracking(1.5)
                 .foregroundStyle(SQ5Colors.textTertiary)
 
-            HStack(alignment: .lastTextBaseline, spacing: 8) {
+            HStack(alignment: .lastTextBaseline, spacing: 6) {
                 Text(value)
-                    .font(emphasis == .hero ? SQ5Typography.display : SQ5Typography.title)
+                    .font(emphasis == .hero ? SQ5Typography.displayMid : SQ5Typography.title)
                     .foregroundStyle(SQ5Colors.textPrimary)
                     .monospacedDigit()
                 if let unit {
@@ -26,15 +26,14 @@ struct KpiTile: View {
                         .foregroundStyle(SQ5Colors.textSecondary)
                 }
             }
-            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(emphasis == .hero ? 28 : 16)
+        .padding(emphasis == .hero ? 22 : 14)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(SQ5Colors.surface)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .stroke(SQ5Colors.border, lineWidth: 1)
                 )
         )
@@ -57,27 +56,61 @@ struct SectionHeader: View {
     }
 }
 
+/// Top brand bar — Wordmark (image) + SQ5 accent + clock.
 struct BrandBar: View {
     var body: some View {
-        HStack(spacing: 18) {
-            Text("AUDI")
-                .font(.system(size: 22, weight: .bold))
-                .tracking(8)
-                .foregroundStyle(SQ5Colors.textPrimary)
+        HStack(spacing: 16) {
+            Image("Wordmark")
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(height: 24)
+
             Rectangle()
-                .fill(SQ5Colors.aluminum.opacity(0.5))
+                .fill(SQ5Colors.aluminum.opacity(0.45))
                 .frame(width: 1, height: 22)
+
             Text("SQ5")
-                .font(.system(size: 20, weight: .semibold))
+                .font(.system(size: 22, weight: .semibold, design: .default))
                 .tracking(4)
                 .foregroundStyle(SQ5Colors.accent)
+
             Spacer()
-            Text(Date().formatted(date: .omitted, time: .shortened))
-                .font(SQ5Typography.subtitle)
-                .foregroundStyle(SQ5Colors.textSecondary)
-                .monospacedDigit()
+
+            // Status pills
+            HStack(spacing: 14) {
+                StatusPill(symbol: "thermometer.medium", value: "23°", caption: "AIR")
+                StatusPill(symbol: "fuelpump.fill", value: "65%", caption: "FUEL")
+                Text(Date().formatted(date: .omitted, time: .shortened))
+                    .font(SQ5Typography.subtitle)
+                    .foregroundStyle(SQ5Colors.textSecondary)
+                    .monospacedDigit()
+            }
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 14)
+        .padding(.horizontal, 26)
+        .padding(.vertical, 16)
+    }
+}
+
+private struct StatusPill: View {
+    let symbol: String
+    let value: String
+    let caption: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(SQ5Colors.textTertiary)
+            VStack(alignment: .leading, spacing: -2) {
+                Text(value)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(SQ5Colors.textPrimary)
+                    .monospacedDigit()
+                Text(caption)
+                    .font(.system(size: 8, weight: .semibold))
+                    .tracking(1.2)
+                    .foregroundStyle(SQ5Colors.textTertiary)
+            }
+        }
     }
 }

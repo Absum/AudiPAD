@@ -7,25 +7,44 @@ struct HomeView: View {
 
             VStack(spacing: 0) {
                 BrandBar()
+
                 Rectangle()
                     .fill(SQ5Colors.border)
                     .frame(height: 1)
 
-                HStack(spacing: 20) {
-                    KpiTile(label: "Speed", value: "87", unit: "km/h", emphasis: .hero)
-                    KpiTile(label: "RPM", value: "2 400", unit: nil, emphasis: .hero)
-                }
-                .padding(20)
+                // Hero gauges
+                HStack(spacing: 18) {
+                    SQ5Gauge(value: 87,
+                             minValue: 0,
+                             maxValue: 240,
+                             label: "Speed",
+                             unit: "km/h",
+                             majorStep: 20)
+                        .frame(maxWidth: .infinity)
 
-                HStack(spacing: 12) {
-                    KpiTile(label: "Fuel", value: "65", unit: "%")
-                    KpiTile(label: "Coolant", value: "92", unit: "°C")
-                    KpiTile(label: "Oil", value: "104", unit: "°C")
-                    KpiTile(label: "Boost", value: "1.4", unit: "bar")
-                    KpiTile(label: "Gear", value: "D5")
+                    SQ5Gauge(value: 2400,
+                             minValue: 0,
+                             maxValue: 7000,
+                             label: "RPM",
+                             unit: nil,
+                             redlineStart: 4500,
+                             majorStep: 1000)
+                        .frame(maxWidth: .infinity)
                 }
                 .padding(.horizontal, 20)
-                .padding(.bottom, 20)
+                .padding(.top, 14)
+                .padding(.bottom, 12)
+
+                // KPI strip
+                HStack(spacing: 10) {
+                    KpiTile(label: "Coolant", value: "92",  unit: "°C")
+                    KpiTile(label: "Oil",     value: "104", unit: "°C")
+                    KpiTile(label: "Boost",   value: "1.4", unit: "bar")
+                    KpiTile(label: "Intake",  value: "38",  unit: "°C")
+                    KpiTile(label: "Gear",    value: "D5")
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 18)
             }
         }
     }

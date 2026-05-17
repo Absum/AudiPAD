@@ -1,35 +1,23 @@
 import SwiftUI
 
 struct ContentView: View {
-    enum Tab: Hashable {
-        case home, drive, map, media, settings
-    }
-
-    @State private var selectedTab: Tab = .home
+    @State private var selectedTab: AppTab = .home
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            HomeView()
-                .tabItem { Label("Home", systemImage: "gauge.medium") }
-                .tag(Tab.home)
+        HStack(spacing: 0) {
+            NavRail(selection: $selectedTab)
 
-            DriveView()
-                .tabItem { Label("Drive", systemImage: "car.fill") }
-                .tag(Tab.drive)
-
-            MapTabView()
-                .tabItem { Label("Map", systemImage: "map.fill") }
-                .tag(Tab.map)
-
-            MediaView()
-                .tabItem { Label("Media", systemImage: "play.circle.fill") }
-                .tag(Tab.media)
-
-            SettingsView()
-                .tabItem { Label("Settings", systemImage: "gearshape.fill") }
-                .tag(Tab.settings)
+            Group {
+                switch selectedTab {
+                case .home:     HomeView()
+                case .drive:    DriveView()
+                case .map:      MapTabView()
+                case .media:    MediaView()
+                case .settings: SettingsView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .tint(SQ5Colors.accent)
         .background(SQ5Colors.background.ignoresSafeArea())
     }
 }
