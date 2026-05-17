@@ -71,11 +71,12 @@ struct SQ5Gauge: View {
                 }
 
                 // Active progress arc — animates fill and color crossfade to accent
-                // when crossing the redline.
+                // when crossing the redline. Sharp (butt) tip for a precise
+                // "needle" feel; round caps read as soft / imprecise.
                 Circle()
                     .trim(from: 0, to: 0.75 * progress)
                     .stroke(activeArcColor,
-                            style: StrokeStyle(lineWidth: strokeWidth, lineCap: .round))
+                            style: StrokeStyle(lineWidth: strokeWidth, lineCap: .butt))
                     .rotationEffect(.degrees(135))
                     .frame(width: arcDiameter, height: arcDiameter)
                     .animation(.easeOut(duration: 0.4), value: progress)
