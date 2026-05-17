@@ -62,12 +62,14 @@ struct MapTabView: View {
             .ignoresSafeArea(edges: .top)
             .allowsHitTesting(false)
 
-            // Right-edge floating control stack: center-on-me, zoom in, zoom out
+            // Right-edge floating control stack: nav-mode toggle, center-on-me, zoom
             VStack {
                 Spacer()
                 MapControls(
                     canCenter: location.isAuthorized && location.location != nil,
                     isFollowing: followMode != .none,
+                    isNavMode: followMode == .followHeading,
+                    onToggleNav: { toggleNavMode() },
                     onCenter: { centerOnUser() },
                     onZoomIn: { vm.zoomIn() },
                     onZoomOut: { vm.zoomOut() }
@@ -218,6 +220,28 @@ struct MapTabView: View {
         )
         followMode = vm.routeInfo != nil ? .followHeading : .follow
     }
+
+    /// Manual toggle for navigation mode. Doesn't require an active route —
+    /// gives users a direct way to engage "follow me with tilted view" any
+    /// time they want it.
+    private func toggleNavMode() {
+        if followMode == .followHeading {
+            followMode = .none
+        } else {
+            // Make sure permission has been asked at least once, then engage.
+            if !location.isAuthorized {
+                location.requestPermission()
+            }
+            followMode = .followHeading
+            // If we have a fix, recentre immediately so the user sees motion.
+            if let here = location.location {
+                vm.region = MKCoordinateRegion(
+                    center: here.coordinate,
+                    span: MKCoordinateSpan(latitudeDelta: 0.006, longitudeDelta: 0.006)
+                )
+            }
+        }
+    }
 }
 
 // MARK: - Floating map controls (right-edge column)
@@ -225,13 +249,25 @@ struct MapTabView: View {
 private struct MapControls: View {
     let canCenter: Bool
     let isFollowing: Bool
+    let isNavMode: Bool
+    let onToggleNav: () -> Void
     let onCenter: () -> Void
     let onZoomIn: () -> Void
     let onZoomOut: () -> Void
 
     var body: some View {
         VStack(spacing: 10) {
-            // Center-on-me button (separate card so it visually stands apart)
+            // Nav-mode toggle (steep tilt + follow-me)
+            Button(action: onToggleNav) {
+                Image(systemName: isNavMode ? "location.north.line.fill" : "location.north.line")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(isNavMode ? SQ5Colors.accent : SQ5Colors.textPrimary)
+                    .frame(width: 48, height: 48)
+            }
+            .buttonStyle(.plain)
+            .background(controlCardBackground)
+
+            // Center-on-me
             Button(action: onCenter) {
                 Image(systemName: isFollowing ? "location.fill" : "location")
                     .font(.system(size: 18, weight: .semibold))
@@ -241,29 +277,24 @@ private struct MapControls: View {
             }
             .buttonStyle(.plain)
             .disabled(!canCenter)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(SQ5Colors.surface.opacity(0.94))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(SQ5Colors.border, lineWidth: 1)
-                    )
-            )
+            .background(controlCardBackground)
 
             // Zoom in / out stack
             VStack(spacing: 6) {
                 ZoomButton(symbol: "plus", action: onZoomIn)
                 ZoomButton(symbol: "minus", action: onZoomOut)
             }
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(SQ5Colors.surface.opacity(0.94))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(SQ5Colors.border, lineWidth: 1)
-                    )
-            )
+            .background(controlCardBackground)
         }
+    }
+
+    private var controlCardBackground: some View {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(SQ5Colors.surface.opacity(0.94))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(SQ5Colors.border, lineWidth: 1)
+            )
     }
 }
 
@@ -695,21 +726,34 @@ private struct MapBackground: UIViewRepresentable {
         uiView.showsUserLocation = showsUser
         context.coordinator.onUserInteraction = onUserInteraction
 
-        // Update tracking mode
-        if uiView.userTrackingMode != followMode.trackingMode {
+        // Update tracking mode FIRST — it can reset camera state, so we
+        // re-apply pitch immediately after on the main runloop.
+        let trackingChanged = uiView.userTrackingMode != followMode.trackingMode
+        if trackingChanged {
             uiView.setUserTrackingMode(followMode.trackingMode, animated: true)
         }
 
-        // Push the new pitch into the camera (smooth animation)
-        let current = uiView.camera
-        if abs(current.pitch - followMode.pitch) > 0.5 {
-            let next = MKMapCamera(
-                lookingAtCenter: current.centerCoordinate,
-                fromDistance: current.altitude,
-                pitch: followMode.pitch,
-                heading: current.heading
-            )
-            uiView.setCamera(next, animated: true)
+        let targetPitch = followMode.pitch
+        let applyPitch = {
+            let cur = uiView.camera
+            if abs(cur.pitch - targetPitch) > 0.5 {
+                let next = MKMapCamera(
+                    lookingAtCenter: cur.centerCoordinate,
+                    fromDistance: cur.altitude,
+                    pitch: targetPitch,
+                    heading: cur.heading
+                )
+                uiView.setCamera(next, animated: true)
+            }
+        }
+        if trackingChanged {
+            // Let the tracking-mode camera animation settle, then push pitch
+            // — otherwise the tracking mode would clobber the pitch we set.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                applyPitch()
+            }
+        } else {
+            applyPitch()
         }
 
         // Region update — only when NOT following the user (otherwise the
