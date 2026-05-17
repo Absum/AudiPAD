@@ -11,12 +11,15 @@ struct HomeView: View {
     ]
 
     var body: some View {
-        ZStack {
+        // `ZStack(alignment: .top)` pins the VStack to the top of the screen — without
+        // this it defaults to `.center` and the whole layout drifts vertically.
+        ZStack(alignment: .top) {
             SQ5Colors.background.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Top header: SQ5 brand mark on the left (where the Audi wordmark used to
-                // sit), ambient status pills + clock on the right.
+                // Top header: SQ5 brand mark on the left (vertically aligned with the
+                // NavRail Audi rings — both centers land at y≈39 from the top), ambient
+                // status pills + clock on the right.
                 HStack(spacing: 14) {
                     Image("SQ5Logo")
                         .resizable()
@@ -33,7 +36,7 @@ struct HomeView: View {
                         .monospacedDigit()
                 }
                 .padding(.horizontal, 26)
-                .padding(.top, 16)
+                .padding(.top, 24)
                 .padding(.bottom, 8)
 
                 // Gauge cluster (Audi-S line: large outer + small center boost), with the
