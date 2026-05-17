@@ -1,11 +1,28 @@
 import SwiftUI
 
-/// Shared top header used by Home + Drive (and likely Map/Media/Settings).
-/// SQ5 brand mark on the left, ambient status pills + clock on the right.
-/// Vertical alignment matches the NavRail Audi rings (both centers at y≈39pt).
+/// Shared top header used by every tab. SQ5 brand mark on the left,
+/// ambient status pills + clock on the right.
+///
+/// `showSpeed`: tabs without a primary speed gauge (Map / Media /
+/// Settings) opt in to a compact speed pill rendered next to the logo,
+/// so the driver can glance at current speed from any screen.
 struct TopBar: View {
-    /// Fuel level (0–100) to display in the FUEL status pill.
     var fuelPercent: Double = 65
+    var showSpeed: Bool = false
+
+    @EnvironmentObject private var location: LocationService
+    @EnvironmentObject private var vehicle: VehicleViewModel
+    @AppStorage(SpeedSource.defaultsKey) private var speedSourceRaw: String = SpeedSource.gps.rawValue
+
+    private var currentSpeedKph: Double {
+        switch SpeedSource(rawValue: speedSourceRaw) ?? .gps {
+        case .gps:
+            guard let s = location.location?.speed, s >= 0 else { return 0 }
+            return s * 3.6
+        case .obd:
+            return vehicle.snapshot.speedKph
+        }
+    }
 
     var body: some View {
         HStack(spacing: 14) {
@@ -13,6 +30,10 @@ struct TopBar: View {
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(height: 30)
+
+            if showSpeed && currentSpeedKph > 0 {
+                SpeedPill(kph: currentSpeedKph)
+            }
 
             Spacer()
 
@@ -30,5 +51,28 @@ struct TopBar: View {
         .padding(.horizontal, 26)
         .padding(.top, 24)
         .padding(.bottom, 14)
+    }
+}
+
+private struct SpeedPill: View {
+    let kph: Double
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Text("\(Int(kph.rounded()))")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(SQ5Colors.textPrimary)
+                .monospacedDigit()
+            Text("km/h")
+                .font(.system(size: 11, weight: .medium))
+                .tracking(0.5)
+                .foregroundStyle(SQ5Colors.textTertiary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(
+            Capsule().fill(SQ5Colors.surface.opacity(0.7))
+                .overlay(Capsule().stroke(SQ5Colors.border, lineWidth: 1))
+        )
     }
 }

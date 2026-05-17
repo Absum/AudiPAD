@@ -30,6 +30,16 @@ final class RoadSpeedLimitService: ObservableObject {
     @Published private(set) var current: Reading?
     @Published private(set) var lastError: String?
 
+    /// Name + reference of the road segment the user is closest to, sourced
+    /// from OSM `way[highway]` tags in the same fetch as the speed limit.
+    /// Surfaced on the Map tab; nil until first OSM response lands.
+    @Published private(set) var currentRoad: RoadInfo?
+
+    struct RoadInfo: Equatable {
+        let name: String?
+        let ref: String?
+    }
+
     private static let osmEndpoint = URL(string: "https://overpass-api.de/api/interpreter")!
     private static let vmsEndpoint = URL(string: "https://tie.digitraffic.fi/api/variable-sign/v1/signs")!
     private static let digiroadEndpoint = URL(string: "https://avoinapi.vaylapilvi.fi/vaylatiedot/digiroad/wfs")!
@@ -141,17 +151,18 @@ final class RoadSpeedLimitService: ObservableObject {
             lastOSMQueriedCoord = coord
 
             let nearest = payload.elements
-                .compactMap { way -> (limit: Int, dist: CLLocationDistance)? in
+                .compactMap { way -> (way: OverpassWay, limit: Int, dist: CLLocationDistance)? in
                     guard let raw = way.tags?["maxspeed"],
                           let limit = Self.parseMaxspeed(raw)
                     else { return nil }
                     let d = Self.nearestVertexDistance(way, to: userLoc)
-                    return (limit, d)
+                    return (way, limit, d)
                 }
                 .min(by: { $0.dist < $1.dist })
 
             guard let n = nearest else {
                 osmReading = nil
+                currentRoad = nil
                 lastError = nil
                 updateCurrent()
                 return
@@ -163,6 +174,12 @@ final class RoadSpeedLimitService: ObservableObject {
                                  source: .osm,
                                  appliedSeasonalAdjustment: adjusted,
                                  timestamp: now)
+            // Publish the road's identity from the same nearest way, falling
+            // back to nil rather than fabricating when tags are absent.
+            let tags = n.way.tags ?? [:]
+            let newRoad = RoadInfo(name: tags["name"],
+                                   ref: tags["ref"] ?? tags["int_ref"])
+            if newRoad != currentRoad { currentRoad = newRoad }
             lastError = nil
             updateCurrent()
         } catch let decoding as DecodingError {

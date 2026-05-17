@@ -7,6 +7,7 @@ struct MapTabView: View {
     @EnvironmentObject private var location: LocationService
     @EnvironmentObject private var traffic: TrafficIncidentService
     @EnvironmentObject private var cameraService: SpeedCameraService
+    @EnvironmentObject private var roadLimits: RoadSpeedLimitService
     @StateObject private var vm = MapViewModel()
     @StateObject private var completer = SearchCompleter()
     @State private var searchText: String = ""
@@ -69,6 +70,20 @@ struct MapTabView: View {
             .ignoresSafeArea(edges: .top)
             .allowsHitTesting(false)
 
+            // Bottom-left road info panel — current road name/ref + active limit.
+            // Only renders when we have at least one of name / ref / limit.
+            VStack {
+                Spacer()
+                RoadInfoPanel(road: roadLimits.currentRoad,
+                              limit: roadLimits.current?.limit,
+                              source: roadLimits.current?.source)
+                    .padding(.leading, 24)
+                    .padding(.bottom, vm.routeInfo == nil ? 26 : 150)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .ignoresSafeArea(edges: .bottom)
+            .allowsHitTesting(false)
+
             // Right-edge floating control stack: nav-mode toggle, center-on-me, zoom
             VStack {
                 Spacer()
@@ -88,7 +103,7 @@ struct MapTabView: View {
             .ignoresSafeArea(edges: .bottom)
 
             VStack(spacing: 0) {
-                TopBar()
+                TopBar(showSpeed: true)
 
                 // Search field
                 HStack(spacing: 10) {
@@ -190,6 +205,9 @@ struct MapTabView: View {
         }
         .onAppear {
             location.requestPermission()
+            // Re-engage tracking every time the Map tab becomes visible — even
+            // if the user panned away on a previous visit.
+            followMode = vm.routeInfo != nil ? .followHeading : .follow
         }
         .onChange(of: vm.routeInfo != nil) { hasRoute in
             // Auto-enter navigation mode when a route is set; relax back on clear.
@@ -317,6 +335,67 @@ private struct ZoomButton: View {
                 .frame(width: 48, height: 48)
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Road info panel (bottom-left)
+
+/// Compact "you are here" panel — current road name + ref + speed limit
+/// + source attribution. Renders nothing when all three are nil so it
+/// stays out of the driver's way before the first fetch lands.
+private struct RoadInfoPanel: View {
+    let road: RoadSpeedLimitService.RoadInfo?
+    let limit: Int?
+    let source: RoadSpeedLimitService.Reading.Source?
+
+    private var hasAnyContent: Bool {
+        (road?.name != nil) || (road?.ref != nil) || (limit != nil)
+    }
+
+    var body: some View {
+        if hasAnyContent {
+            HStack(alignment: .center, spacing: 14) {
+                if let limit {
+                    TrafficSignView(sign: .speedLimit(limit))
+                        .frame(width: 44, height: 44)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    if let ref = road?.ref, !ref.isEmpty {
+                        Text(ref.uppercased())
+                            .font(.system(size: 11, weight: .heavy))
+                            .tracking(1.4)
+                            .foregroundStyle(SQ5Colors.accent)
+                    }
+                    if let name = road?.name, !name.isEmpty {
+                        Text(name)
+                            .font(SQ5Typography.subtitle)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                            .lineLimit(1)
+                    } else if road?.ref == nil {
+                        Text("Road")
+                            .font(SQ5Typography.subtitle)
+                            .foregroundStyle(SQ5Colors.textSecondary)
+                    }
+                    if let source {
+                        Text("source · \(source.rawValue)")
+                            .font(.system(size: 10, weight: .medium))
+                            .tracking(0.4)
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                    }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(SQ5Colors.surface.opacity(0.85))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(SQ5Colors.border, lineWidth: 1)
+                    )
+            )
+            .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 2)
+        }
     }
 }
 

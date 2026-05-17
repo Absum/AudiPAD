@@ -1,9 +1,16 @@
 import SwiftUI
 
 struct MediaView: View {
+    @EnvironmentObject private var vehicle: VehicleViewModel
+
     var body: some View {
-        ZStack {
+        ZStack(alignment: .top) {
             SQ5Colors.background.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                TopBar(fuelPercent: vehicle.snapshot.fuelPercent, showSpeed: true)
+                Spacer()
+            }
 
             HStack(spacing: 48) {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -58,5 +65,7 @@ struct MediaView_Previews: PreviewProvider {
         MediaView()
             .preferredColorScheme(.dark)
             .previewInterfaceOrientation(.landscapeLeft)
+            .environmentObject(VehicleViewModel())
+            .environmentObject(LocationService())
     }
 }

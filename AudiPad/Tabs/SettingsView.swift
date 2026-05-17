@@ -16,7 +16,7 @@ struct SettingsView: View {
             SQ5Colors.background.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                TopBar(fuelPercent: vehicle.snapshot.fuelPercent)
+                TopBar(fuelPercent: vehicle.snapshot.fuelPercent, showSpeed: true)
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 28) {
