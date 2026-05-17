@@ -6,9 +6,9 @@ struct HomeView: View {
     private let currentSpeedLimit: TrafficSign = .speedLimit(80)
     private let recentSigns: [TrafficSign] = [
         .speedLimit(80),
-        .speedLimit(50),
-        .endOfSpeedLimit(50),
-        .yield
+        .speedBump,
+        .stop,
+        .speedLimit(50)
     ]
 
     var body: some View {
