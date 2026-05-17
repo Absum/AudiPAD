@@ -1,107 +1,204 @@
 import SwiftUI
 
 struct DriveView: View {
+    @StateObject private var vehicle = VehicleViewModel()
+
     var body: some View {
-        ZStack {
+        ZStack(alignment: .top) {
             SQ5Colors.background.ignoresSafeArea()
 
-            VStack(alignment: .leading, spacing: 16) {
-                SectionHeader(title: "Live OBD")
-                    .padding(.horizontal, 24)
-                    .padding(.top, 16)
+            VStack(spacing: 0) {
+                TopBar(fuelPercent: vehicle.snapshot.fuelPercent)
 
-                ScrollView {
-                    LazyVGrid(
-                        columns: [
-                            GridItem(.flexible(), spacing: 12),
-                            GridItem(.flexible(), spacing: 12),
-                            GridItem(.flexible(), spacing: 12)
-                        ],
-                        spacing: 12
-                    ) {
-                        ForEach(mockPids) { pid in
-                            PidRow(pid: pid)
-                        }
-                    }
-                    .padding(.horizontal, 24)
+                // ── POWERTRAIN ─────────────────────────────────────────────
+                DriveSectionLabel(title: "Powertrain")
+                    .padding(.horizontal, 26)
+                    .padding(.top, 8)
+                    .padding(.bottom, 10)
+
+                HStack(spacing: 0) {
+                    HeroStat(label: "Boost",
+                             value: String(format: "%.1f", vehicle.snapshot.boostBar),
+                             unit: "bar",
+                             progress: vehicle.snapshot.boostBar / 2.5,
+                             warnThreshold: 0.8)
+                    KpiDivider()
+                    HeroStat(label: "Throttle",
+                             value: "\(Int((vehicle.snapshot.throttle * 100).rounded()))",
+                             unit: "%",
+                             progress: vehicle.snapshot.throttle,
+                             warnThreshold: 0.85)
+                    KpiDivider()
+                    HeroStat(label: "Oil Temp",
+                             value: "\(Int(vehicle.snapshot.oilC.rounded()))",
+                             unit: "°C",
+                             progress: vehicle.snapshot.oilC / 140.0,
+                             warnThreshold: 0.85)
                 }
+                .padding(.horizontal, 20)
 
-                StatusBar(connected: false)
+                // ── LIVE READINGS ──────────────────────────────────────────
+                DriveSectionLabel(title: "Live Readings")
+                    .padding(.horizontal, 26)
+                    .padding(.top, 28)
+                    .padding(.bottom, 10)
+
+                Rectangle()
+                    .fill(SQ5Colors.aluminum.opacity(0.22))
+                    .frame(height: 1)
+                    .padding(.horizontal, 34)
+
+                let cols = [GridItem(.flexible(), spacing: 0),
+                            GridItem(.flexible(), spacing: 0),
+                            GridItem(.flexible(), spacing: 0),
+                            GridItem(.flexible(), spacing: 0)]
+                LazyVGrid(columns: cols, spacing: 0) {
+                    ReadingCell(label: "RPM",
+                                value: "\(Int(vehicle.snapshot.rpm.rounded()))")
+                    ReadingCell(label: "Speed",
+                                value: "\(Int(vehicle.snapshot.speedKph.rounded()))",
+                                unit: "km/h")
+                    ReadingCell(label: "Gear",
+                                value: vehicle.snapshot.gear)
+                    ReadingCell(label: "Coolant",
+                                value: "\(Int(vehicle.snapshot.coolantC.rounded()))",
+                                unit: "°C")
+                    ReadingCell(label: "Intake",
+                                value: "\(Int(vehicle.snapshot.intakeC.rounded()))",
+                                unit: "°C")
+                    ReadingCell(label: "Fuel",
+                                value: "\(Int(vehicle.snapshot.fuelPercent.rounded()))",
+                                unit: "%")
+                    ReadingCell(label: "Range",
+                                value: "\(Int(vehicle.snapshot.rangeKm.rounded()))",
+                                unit: "km")
+                    ReadingCell(label: "Now",
+                                value: String(format: "%.1f", vehicle.snapshot.nowConsumption),
+                                unit: "L/100")
+                }
+                .padding(.horizontal, 30)
+                .padding(.top, 4)
+
+                Spacer()
+
+                // ── CONNECTION FOOTER ──────────────────────────────────────
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(SQ5Colors.danger)
+                        .frame(width: 8, height: 8)
+                    Text("ELM327 — not connected · showing simulated data")
+                        .font(SQ5Typography.caption)
+                        .foregroundStyle(SQ5Colors.textSecondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 30)
+                .padding(.bottom, 16)
             }
         }
-    }
-
-    private var mockPids: [MockPid] {
-        [
-            .init(name: "Engine RPM",      value: "2 400", unit: "rpm"),
-            .init(name: "Vehicle speed",   value: "87",    unit: "km/h"),
-            .init(name: "Coolant temp",    value: "92",    unit: "°C"),
-            .init(name: "Intake temp",     value: "38",    unit: "°C"),
-            .init(name: "MAF rate",        value: "21.4",  unit: "g/s"),
-            .init(name: "Throttle pos",    value: "18",    unit: "%"),
-            .init(name: "Boost pressure",  value: "1.4",   unit: "bar"),
-            .init(name: "Fuel level",      value: "65",    unit: "%"),
-            .init(name: "Battery voltage", value: "14.2",  unit: "V")
-        ]
+        .onAppear { vehicle.start() }
+        .onDisappear { vehicle.stop() }
     }
 }
 
-private struct MockPid: Identifiable {
-    let id = UUID()
-    let name: String
-    let value: String
-    let unit: String
-}
+// MARK: - Drive-tab-local components
 
-private struct PidRow: View {
-    let pid: MockPid
+private struct DriveSectionLabel: View {
+    let title: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(pid.name.uppercased())
-                .font(SQ5Typography.caption)
-                .tracking(1)
-                .foregroundStyle(SQ5Colors.textTertiary)
-            HStack(alignment: .lastTextBaseline, spacing: 4) {
-                Text(pid.value)
-                    .font(.system(size: 24, weight: .semibold))
-                    .foregroundStyle(SQ5Colors.textPrimary)
-                    .monospacedDigit()
-                Text(pid.unit)
-                    .font(SQ5Typography.caption)
-                    .foregroundStyle(SQ5Colors.textSecondary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(SQ5Colors.surface)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(SQ5Colors.border, lineWidth: 1)
-                )
-        )
-    }
-}
-
-private struct StatusBar: View {
-    let connected: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(connected ? SQ5Colors.success : SQ5Colors.danger)
-                .frame(width: 8, height: 8)
-            Text(connected
-                 ? "ELM327 connected"
-                 : "ELM327 not connected — showing mock data")
-                .font(SQ5Typography.caption)
+        HStack(spacing: 10) {
+            Rectangle()
+                .fill(SQ5Colors.accent)
+                .frame(width: 3, height: 14)
+            Text(title.uppercased())
+                .font(.system(size: 12, weight: .semibold))
+                .tracking(2.5)
                 .foregroundStyle(SQ5Colors.textSecondary)
             Spacer()
         }
-        .padding(.horizontal, 24)
-        .padding(.bottom, 16)
+    }
+}
+
+/// Large stat with a horizontal fill bar underneath. Bar fades to accent red
+/// once `progress` crosses `warnThreshold`.
+private struct HeroStat: View {
+    let label: String
+    let value: String
+    let unit: String
+    let progress: Double
+    var warnThreshold: Double = 0.85
+
+    private var clamped: Double { max(0, min(1, progress)) }
+    private var fillColor: Color {
+        clamped >= warnThreshold ? SQ5Colors.accent : SQ5Colors.textPrimary
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(label.uppercased())
+                .font(SQ5Typography.caption)
+                .tracking(1.8)
+                .foregroundStyle(SQ5Colors.textTertiary)
+
+            HStack(alignment: .lastTextBaseline, spacing: 6) {
+                Text(value)
+                    .font(.system(size: 44, weight: .light, design: .default))
+                    .foregroundStyle(SQ5Colors.textPrimary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Text(unit)
+                    .font(SQ5Typography.subtitle)
+                    .foregroundStyle(SQ5Colors.textSecondary)
+            }
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(SQ5Colors.border)
+                        .frame(height: 3)
+                    Capsule()
+                        .fill(fillColor)
+                        .frame(width: max(0, geo.size.width * clamped), height: 3)
+                        .animation(.easeOut(duration: 0.25), value: clamped)
+                }
+            }
+            .frame(height: 3)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 16)
+    }
+}
+
+/// Compact read-only data point — label above, value below, no chrome.
+private struct ReadingCell: View {
+    let label: String
+    let value: String
+    var unit: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label.uppercased())
+                .font(.system(size: 9, weight: .semibold))
+                .tracking(1.5)
+                .foregroundStyle(SQ5Colors.textTertiary)
+            HStack(alignment: .lastTextBaseline, spacing: 3) {
+                Text(value)
+                    .font(.system(size: 22, weight: .regular, design: .default))
+                    .foregroundStyle(SQ5Colors.textPrimary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                if let unit {
+                    Text(unit)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(SQ5Colors.textSecondary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 12)
     }
 }
 
