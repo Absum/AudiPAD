@@ -372,7 +372,10 @@ private struct RoadInfoPanel: View {
                             .foregroundStyle(SQ5Colors.textPrimary)
                             .lineLimit(1)
                     } else if road?.ref == nil {
-                        Text("Road")
+                        // Neither Apple nor OSM gave us a name *and* there's
+                        // no road number to fall back on — we're somewhere
+                        // off the road network (parking lot, field, etc.).
+                        Text("Off road")
                             .font(SQ5Typography.subtitle)
                             .foregroundStyle(SQ5Colors.textSecondary)
                     }

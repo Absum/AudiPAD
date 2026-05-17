@@ -59,6 +59,20 @@ final class RoadSpeedLimitService: ObservableObject {
     private var vmsReading: Reading?
     private var digiroadReading: Reading?
 
+    /// Independent road-info pieces from each source. Combined by
+    /// `rebuildRoadInfo()` into the published `currentRoad`. Apple is
+    /// preferred for `name` because it's the same data backing the
+    /// MapKit view (so the panel never disagrees with the map); OSM
+    /// fills the `ref` field (road number) because Apple doesn't
+    /// expose that, and provides a name fallback for areas Apple
+    /// doesn't cover well.
+    private var appleRoadName: String?
+    private var osmRoadName: String?
+    private var osmRoadRef: String?
+
+    private let geocoder = CLGeocoder()
+    private var lastGeocodedCoord: CLLocationCoordinate2D?
+
     /// Raw Digiroad segments kept around so we can answer "what road
     /// link is this coordinate on?" — used by the speed-camera same-
     /// road gate. Replaced on every Digiroad fetch.
@@ -88,7 +102,8 @@ final class RoadSpeedLimitService: ObservableObject {
                 async let osm: () = self.fetchOSM(around: coord)
                 async let dig: () = self.fetchDigiroad(around: coord)
                 async let vms: () = self.refreshVMSList()
-                _ = await (osm, dig, vms)
+                async let apple: () = self.fetchAppleRoadName(at: coord)
+                _ = await (osm, dig, vms, apple)
                 self.recomputeVMSReading(for: coord)
             }
             while !Task.isCancelled {
@@ -104,6 +119,9 @@ final class RoadSpeedLimitService: ObservableObject {
                 }
                 if self.shouldRefreshVMS() {
                     await self.refreshVMSList()
+                }
+                if self.shouldRefetchGeocode(for: coord) {
+                    await self.fetchAppleRoadName(at: coord)
                 }
                 self.recomputeVMSReading(for: coord)
             }
@@ -156,18 +174,17 @@ final class RoadSpeedLimitService: ObservableObject {
 
             // Road identity: pick the absolute nearest highway way (whether
             // or not it has maxspeed), so the bottom-of-map road panel
-            // populates on residential streets too.
+            // populates on residential streets too. Stash separately —
+            // Apple Maps (CLGeocoder) provides the preferred name; OSM
+            // contributes the ref (road number, e.g. "E12") that Apple
+            // doesn't expose, and acts as a name fallback.
             let nearestRoad = payload.elements
                 .map { way in (way, Self.nearestVertexDistance(way, to: userLoc)) }
                 .min(by: { $0.1 < $1.1 })
-            if let nr = nearestRoad {
-                let tags = nr.0.tags ?? [:]
-                let newRoad = RoadInfo(name: tags["name"],
-                                       ref: tags["ref"] ?? tags["int_ref"])
-                if newRoad != currentRoad { currentRoad = newRoad }
-            } else {
-                if currentRoad != nil { currentRoad = nil }
-            }
+            let tags = nearestRoad?.0.tags ?? [:]
+            osmRoadName = tags["name"]
+            osmRoadRef = tags["ref"] ?? tags["int_ref"]
+            rebuildRoadInfo()
 
             // Speed limit: must come from a way that actually has the tag.
             let nearestWithLimit = payload.elements
@@ -297,6 +314,44 @@ final class RoadSpeedLimitService: ObservableObject {
         } catch {
             lastError = "Digiroad network: \(error.localizedDescription)"
         }
+    }
+
+    // MARK: - Apple Maps reverse geocoding (road name)
+
+    /// 50 m movement threshold matches OSM. CLGeocoder is rate-limited
+    /// (~1/s safe) so we don't want to call it more often than the
+    /// underlying road would change anyway.
+    private func shouldRefetchGeocode(for coord: CLLocationCoordinate2D) -> Bool {
+        guard let last = lastGeocodedCoord else { return true }
+        let here = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+        let there = CLLocation(latitude: last.latitude, longitude: last.longitude)
+        return here.distance(from: there) > Self.refetchDistanceM
+    }
+
+    private func fetchAppleRoadName(at coord: CLLocationCoordinate2D) async {
+        let loc = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+        do {
+            let placemarks = try await geocoder.reverseGeocodeLocation(loc)
+            // `thoroughfare` is the street name (e.g. "Mannerheimintie").
+            // Apple doesn't expose road numbers (E18, Vt 7) so we leave
+            // ref to OSM.
+            appleRoadName = placemarks.first?.thoroughfare
+            lastGeocodedCoord = coord
+            rebuildRoadInfo()
+        } catch {
+            // Geocoder failures are common: rate-limit, no network,
+            // off-grid coord. Don't clobber the previous name — the
+            // panel keeps showing what it last knew.
+        }
+    }
+
+    /// Recompute the published `currentRoad` from whichever per-source
+    /// pieces are currently populated. Apple > OSM for name; OSM owns
+    /// ref because Apple doesn't expose it.
+    private func rebuildRoadInfo() {
+        let name = appleRoadName ?? osmRoadName
+        let newRoad = RoadInfo(name: name, ref: osmRoadRef)
+        if newRoad != currentRoad { currentRoad = newRoad }
     }
 
     // MARK: - Road link snap (for speed-camera same-road gate)

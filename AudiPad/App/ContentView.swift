@@ -154,7 +154,7 @@ private enum AlertPlacement {
     /// the search row.
     var topPadding: CGFloat {
         switch self {
-        case .top:    return 140
+        case .top:    return 130
         case .bottom: return 0
         }
     }
