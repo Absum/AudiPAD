@@ -2,19 +2,18 @@ import Foundation
 import CoreLocation
 import Combine
 
-/// Phase 1 of the road-speed-limit pipeline: queries OpenStreetMap via
-/// Overpass for `highway` ways with a `maxspeed` tag near the user's
-/// current position, picks the nearest one, applies a Finnish
-/// summer-vs-winter heuristic (Nov 1 – Mar 31 → knock down typical
-/// trunk/motorway values), and publishes the result.
+/// Coordinates per-source road-speed-limit readings and publishes the
+/// best one as `current`. Priority:
 ///
-/// Layered later by:
-/// - Phase 2: Digitraffic Variable Sign override on highway segments
-///   that have a live VMS within ~500 m showing a speed-limit value.
-/// - Phase 3: Digitraffic Tierekisteri / Digiroad — authoritative
-///   national road database with explicit summer/winter limits per
-///   road link, replacing the OSM + heuristic combo for FI roads.
-/// - Eventually overridden by the TSR pipeline when a sign is detected.
+///   1. Digitraffic Variable Sign (VMS) — Phase 2, live highway signs
+///   2. OSM `maxspeed` + Finland winter heuristic — Phase 1, default
+///   3. nil (no data)
+///
+/// Future:
+///   - TSR (computer vision) — highest priority when the camera is
+///     confident in what it just saw
+///   - Tierekisteri / Digiroad — authoritative summer/winter per
+///     road segment (would sit between VMS and OSM)
 @MainActor
 final class RoadSpeedLimitService: ObservableObject {
 
@@ -23,7 +22,8 @@ final class RoadSpeedLimitService: ObservableObject {
 
         let limit: Int
         let source: Source
-        /// True if the Finland winter-limit heuristic adjusted the value.
+        /// True if the Finland winter-limit heuristic adjusted the value
+        /// (only meaningful for OSM source).
         let appliedSeasonalAdjustment: Bool
         let timestamp: Date
     }
@@ -31,13 +31,26 @@ final class RoadSpeedLimitService: ObservableObject {
     @Published private(set) var current: Reading?
     @Published private(set) var lastError: String?
 
-    private static let endpoint = URL(string: "https://overpass-api.de/api/interpreter")!
+    private static let osmEndpoint = URL(string: "https://overpass-api.de/api/interpreter")!
+    private static let vmsEndpoint = URL(string: "https://tie.digitraffic.fi/api/variable-sign/v1/signs")!
     private static let cacheKey = "audipad.roads.lastReading.v1"
     private static let refetchDistanceM: CLLocationDistance = 50
+    private static let vmsRadiusM: CLLocationDistance = 500
     private static let cacheMaxAgeSec: TimeInterval = 24 * 3600
+    private static let vmsRefreshIntervalSec: TimeInterval = 60
+
+    // MARK: Internal state
+
+    private var osmReading: Reading?
+    private var vmsReading: Reading?
+
+    /// Cached list of all VMS speed-limit signs nationwide. Refreshed on
+    /// the VMS cadence; nearest-sign lookup runs on every coord change.
+    private var vmsSigns: [VMSSign] = []
+    private var vmsLastFetch: Date?
 
     private var ticker: Task<Void, Never>?
-    private var lastQueriedCoord: CLLocationCoordinate2D?
+    private var lastOSMQueriedCoord: CLLocationCoordinate2D?
     private var coordProvider: () -> CLLocationCoordinate2D? = { nil }
 
     init() {
@@ -49,17 +62,25 @@ final class RoadSpeedLimitService: ObservableObject {
         guard ticker == nil else { return }
         ticker = Task { [weak self] in
             guard let self else { return }
-            // First immediate attempt
+            // Initial pulls
             if let coord = self.coordProvider() {
-                await self.fetch(around: coord)
+                async let osm: () = self.fetchOSM(around: coord)
+                async let vms: () = self.refreshVMSList()
+                _ = await (osm, vms)
+                self.recomputeVMSReading(for: coord)
             }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(20))
+                try? await Task.sleep(for: .seconds(15))
                 guard !Task.isCancelled else { break }
-                if let coord = self.coordProvider(),
-                   self.shouldFetch(for: coord) {
-                    await self.fetch(around: coord)
+                guard let coord = self.coordProvider() else { continue }
+
+                if self.shouldRefetchOSM(for: coord) {
+                    await self.fetchOSM(around: coord)
                 }
+                if self.shouldRefreshVMS() {
+                    await self.refreshVMSList()
+                }
+                self.recomputeVMSReading(for: coord)
             }
         }
     }
@@ -69,40 +90,41 @@ final class RoadSpeedLimitService: ObservableObject {
         ticker = nil
     }
 
-    // MARK: - Fetch
+    // MARK: - OSM fetch (Phase 1)
 
-    private func shouldFetch(for coord: CLLocationCoordinate2D) -> Bool {
-        guard let last = lastQueriedCoord else { return true }
+    private func shouldRefetchOSM(for coord: CLLocationCoordinate2D) -> Bool {
+        guard let last = lastOSMQueriedCoord else { return true }
         let here = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
         let there = CLLocation(latitude: last.latitude, longitude: last.longitude)
         return here.distance(from: there) > Self.refetchDistanceM
     }
 
-    private func fetch(around coord: CLLocationCoordinate2D) async {
+    private func fetchOSM(around coord: CLLocationCoordinate2D) async {
         let query = """
         [out:json][timeout:15];
         way["highway"]["maxspeed"](around:200,\(coord.latitude),\(coord.longitude));
         out tags geom;
         """
-        guard var components = URLComponents(url: Self.endpoint, resolvingAgainstBaseURL: false) else { return }
+        guard var components = URLComponents(url: Self.osmEndpoint, resolvingAgainstBaseURL: false) else { return }
         components.queryItems = [URLQueryItem(name: "data", value: query)]
         guard let url = components.url else { return }
 
         do {
             var request = URLRequest(url: url)
             request.setValue("AudiPad/0.1 (github.com/Absum/AudiPAD)", forHTTPHeaderField: "User-Agent")
+            request.setValue("gzip", forHTTPHeaderField: "Accept-Encoding")
             request.timeoutInterval = 30
             let (data, response) = try await URLSession.shared.data(for: request)
 
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                lastError = "HTTP \(http.statusCode)"
+                lastError = "OSM HTTP \(http.statusCode)"
                 return
             }
 
             let payload = try JSONDecoder().decode(OverpassWaysResponse.self, from: data)
             let userLoc = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+            lastOSMQueriedCoord = coord
 
-            // Pick the way whose nearest vertex is closest to the user
             let nearest = payload.elements
                 .compactMap { way -> (limit: Int, dist: CLLocationDistance)? in
                     guard let raw = way.tags?["maxspeed"],
@@ -113,38 +135,109 @@ final class RoadSpeedLimitService: ObservableObject {
                 }
                 .min(by: { $0.dist < $1.dist })
 
-            // Track the queried point regardless of result so we don't
-            // hammer Overpass when the user is in a no-data area
-            lastQueriedCoord = coord
-
             guard let n = nearest else {
-                // No nearby roads with a maxspeed tag; surface that as nil
-                // instead of holding onto a stale reading from a previous spot.
-                current = nil
+                osmReading = nil
                 lastError = nil
+                updateCurrent()
                 return
             }
 
             let now = Date()
             let (limit, adjusted) = Self.applyFinlandWinterRule(n.limit, on: now)
-            let reading = Reading(
-                limit: limit,
-                source: .osm,
-                appliedSeasonalAdjustment: adjusted,
-                timestamp: now
-            )
-
-            current = reading
+            osmReading = Reading(limit: limit,
+                                 source: .osm,
+                                 appliedSeasonalAdjustment: adjusted,
+                                 timestamp: now)
             lastError = nil
-            saveCache(reading)
+            updateCurrent()
         } catch let decoding as DecodingError {
-            lastError = "Decode: \(decoding.localizedDescription)"
+            lastError = "OSM decode: \(decoding.localizedDescription)"
         } catch {
-            lastError = "Network: \(error.localizedDescription)"
+            lastError = "OSM network: \(error.localizedDescription)"
         }
     }
 
-    // MARK: - Helpers
+    // MARK: - VMS fetch (Phase 2)
+
+    private func shouldRefreshVMS() -> Bool {
+        guard let last = vmsLastFetch else { return true }
+        return Date().timeIntervalSince(last) > Self.vmsRefreshIntervalSec
+    }
+
+    private func refreshVMSList() async {
+        do {
+            var request = URLRequest(url: Self.vmsEndpoint)
+            request.setValue("AudiPad/0.1 (github.com/Absum/AudiPAD)", forHTTPHeaderField: "User-Agent")
+            request.setValue("gzip", forHTTPHeaderField: "Accept-Encoding")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.timeoutInterval = 20
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                lastError = "VMS HTTP \(http.statusCode)"
+                return
+            }
+
+            let payload = try JSONDecoder().decode(VMSResponse.self, from: data)
+            vmsSigns = payload.features.compactMap { feature -> VMSSign? in
+                let props = feature.properties
+                guard props.type == "SPEEDLIMIT",
+                      let valueStr = props.displayValue,
+                      let value = Int(valueStr.trimmingCharacters(in: .whitespaces).filter(\.isNumber))
+                else { return nil }
+                guard let geom = feature.geometry, geom.type == "Point",
+                      let coords = geom.coordinates, coords.count >= 2
+                else { return nil }
+                return VMSSign(
+                    id: props.id ?? UUID().uuidString,
+                    coord: CLLocationCoordinate2D(latitude: coords[1], longitude: coords[0]),
+                    limit: value,
+                    direction: props.direction,
+                    carriageway: props.carriageway
+                )
+            }
+            vmsLastFetch = Date()
+            lastError = nil
+        } catch let decoding as DecodingError {
+            lastError = "VMS decode: \(decoding.localizedDescription)"
+        } catch {
+            lastError = "VMS network: \(error.localizedDescription)"
+        }
+    }
+
+    private func recomputeVMSReading(for coord: CLLocationCoordinate2D) {
+        let userLoc = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+        let nearest = vmsSigns
+            .map { sign -> (VMSSign, CLLocationDistance) in
+                let dist = userLoc.distance(from: CLLocation(latitude: sign.coord.latitude,
+                                                             longitude: sign.coord.longitude))
+                return (sign, dist)
+            }
+            .filter { $0.1 <= Self.vmsRadiusM }
+            .min(by: { $0.1 < $1.1 })
+
+        if let n = nearest {
+            vmsReading = Reading(limit: n.0.limit,
+                                 source: .vms,
+                                 appliedSeasonalAdjustment: false,
+                                 timestamp: Date())
+        } else {
+            vmsReading = nil
+        }
+        updateCurrent()
+    }
+
+    // MARK: - Source coordination
+
+    private func updateCurrent() {
+        // Priority: VMS > OSM. Tierekisteri/TSR will slot in later.
+        let best = vmsReading ?? osmReading
+        if best != current {
+            current = best
+            if let r = best { saveCache(r) }
+        }
+    }
+
+    // MARK: - Helpers (same as Phase 1)
 
     private static func nearestVertexDistance(_ way: OverpassWay, to user: CLLocation) -> CLLocationDistance {
         (way.geometry ?? []).map { v in
@@ -152,11 +245,6 @@ final class RoadSpeedLimitService: ObservableObject {
         }.min() ?? .infinity
     }
 
-    /// Parse common OSM `maxspeed` tag values:
-    /// - `"50"` → 50
-    /// - `"50 mph"` → 80 (converted)
-    /// - `"FI:urban"` → 50, `"FI:rural"` → 80, `"FI:motorway"` → 120, `"FI:living_street"` → 20
-    /// - `"none"` / `"walk"` / `"signals"` / unknown → nil (no speed-limit value)
     static func parseMaxspeed(_ raw: String) -> Int? {
         let trimmed = raw.trimmingCharacters(in: .whitespaces).lowercased()
         if trimmed == "none" || trimmed == "signals" || trimmed.hasPrefix("walk") {
@@ -177,9 +265,6 @@ final class RoadSpeedLimitService: ObservableObject {
         return Int(trimmed)
     }
 
-    /// Finland winter speed-limit heuristic: Nov 1 – Mar 31 inclusive
-    /// the typical motorway / trunk / main-road summer limits are
-    /// reduced by 20 km/h. City limits stay the same.
     static func applyFinlandWinterRule(_ limit: Int, on date: Date) -> (Int, Bool) {
         let cal = Calendar(identifier: .gregorian)
         let month = cal.component(.month, from: date)
@@ -201,12 +286,24 @@ final class RoadSpeedLimitService: ObservableObject {
               Date().timeIntervalSince(r.timestamp) < Self.cacheMaxAgeSec
         else { return }
         current = r
+        // Treat the cache as the OSM baseline so VMS can override after first fetch
+        if r.source == .osm { osmReading = r }
     }
 
     private func saveCache(_ r: Reading) {
         guard let data = try? JSONEncoder().encode(r) else { return }
         UserDefaults.standard.set(data, forKey: Self.cacheKey)
     }
+}
+
+// MARK: - VMS internal model
+
+private struct VMSSign {
+    let id: String
+    let coord: CLLocationCoordinate2D
+    let limit: Int
+    let direction: String?     // "INCREASING" / "DECREASING" — relative to road kilometre
+    let carriageway: String?   // "RIGHT" / "LEFT" / "NORMAL"
 }
 
 // MARK: - Overpass response shapes (ways with geometry)
@@ -225,4 +322,35 @@ private struct OverpassWay: Decodable {
 private struct OverpassVertex: Decodable {
     let lat: Double
     let lon: Double
+}
+
+// MARK: - Digitraffic VMS response shapes
+
+private struct VMSResponse: Decodable {
+    let features: [VMSFeature]
+}
+
+private struct VMSFeature: Decodable {
+    let geometry: VMSGeometry?
+    let properties: VMSProperties
+}
+
+private struct VMSGeometry: Decodable {
+    let type: String
+    let coordinates: [Double]?
+
+    enum CodingKeys: String, CodingKey { case type, coordinates }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = try c.decode(String.self, forKey: .type)
+        self.coordinates = try? c.decode([Double].self, forKey: .coordinates)
+    }
+}
+
+private struct VMSProperties: Decodable {
+    let id: String?
+    let type: String?
+    let displayValue: String?
+    let direction: String?
+    let carriageway: String?
 }
