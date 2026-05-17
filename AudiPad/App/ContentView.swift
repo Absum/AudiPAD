@@ -4,10 +4,14 @@ struct ContentView: View {
     @State private var selectedTab: AppTab = .home
 
     /// Shared across all tabs so data is consistent + so cross-cutting
-    /// features (speed camera monitor) can subscribe to one source.
+    /// features (speed camera monitor, traffic incidents) can subscribe
+    /// to one source.
     @StateObject private var vehicle = VehicleViewModel()
+    @StateObject private var cameraService = SpeedCameraService()
     @StateObject private var cameras = SpeedCameraMonitor()
     @StateObject private var locationService = LocationService()
+    @StateObject private var traffic = TrafficIncidentService()
+    @StateObject private var trafficMonitor = TrafficIncidentMonitor()
 
     var body: some View {
         HStack(spacing: 0) {
@@ -25,9 +29,9 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                // Cross-cutting speed-camera alert. Mounted at the
-                // ContentView level so it's visible regardless of selected tab.
-                // Placement varies per tab (Map: top under search, others: bottom).
+                // Cross-cutting alert overlay. Camera alerts take priority
+                // (they're immediately safety-relevant); traffic incidents
+                // surface when no camera alert is active.
                 if let approach = cameras.nearestApproaching {
                     let placement = AlertPlacement.for(tab: selectedTab)
                     SpeedCameraAlertBanner(approach: approach)
@@ -41,16 +45,57 @@ struct ContentView: View {
                         .transition(.move(edge: placement.transitionEdge)
                                     .combined(with: .opacity))
                         .zIndex(10)
+                } else if let incident = trafficMonitor.severeNearby {
+                    let placement = AlertPlacement.for(tab: selectedTab)
+                    TrafficAlertBanner(incident: incident,
+                                       distanceMeters: trafficMonitor.severeDistanceMeters)
+                        .padding(.horizontal, 24)
+                        .padding(.top, placement.topPadding)
+                        .padding(.bottom, placement.bottomPadding)
+                        .frame(maxWidth: .infinity,
+                               maxHeight: .infinity,
+                               alignment: placement.alignment)
+                        .allowsHitTesting(false)
+                        .transition(.move(edge: placement.transitionEdge)
+                                    .combined(with: .opacity))
+                        .zIndex(9)
                 }
             }
             .animation(.easeOut(duration: 0.3), value: cameras.nearestApproaching != nil)
+            .animation(.easeOut(duration: 0.3), value: trafficMonitor.severeNearby != nil)
             .animation(.easeInOut(duration: 0.25), value: selectedTab)
         }
         .environmentObject(vehicle)
         .environmentObject(locationService)
+        .environmentObject(traffic)
         .background(SQ5Colors.background.ignoresSafeArea())
+        .onAppear {
+            traffic.start(movingProvider: { [weak vehicle] in
+                guard let vehicle else { return false }
+                return vehicle.snapshot.speedKph > 5
+            })
+            cameraService.start(userCenterProvider: { [weak locationService, weak vehicle] in
+                // Prefer real GPS when available; fall back to simulated
+                // vehicle coordinate so the service still works on the
+                // bench without location permission.
+                locationService?.location?.coordinate ?? vehicle?.snapshot.coordinate
+            })
+        }
+        .onDisappear {
+            traffic.stop()
+            cameraService.stop()
+        }
         .onReceive(vehicle.$snapshot) { snap in
-            cameras.update(vehicle: snap.coordinate)
+            cameras.update(cameras: cameraService.cameras, vehicle: snap.coordinate)
+            trafficMonitor.update(incidents: traffic.incidents,
+                                  userLocation: snap.coordinate)
+        }
+        .onReceive(cameraService.$cameras) { latest in
+            cameras.update(cameras: latest, vehicle: vehicle.snapshot.coordinate)
+        }
+        .onReceive(traffic.$incidents) { incidents in
+            trafficMonitor.update(incidents: incidents,
+                                  userLocation: vehicle.snapshot.coordinate)
         }
     }
 }

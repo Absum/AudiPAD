@@ -6,7 +6,7 @@ import SwiftUI
 
 /// A single fixed/mobile/average-speed enforcement camera.
 struct SpeedCamera: Identifiable, Hashable {
-    enum Kind: String { case fixed, mobile, averageSpeed }
+    enum Kind: String, Codable { case fixed, mobile, averageSpeed }
 
     let id: UUID
     let coordinate: CLLocationCoordinate2D
@@ -60,17 +60,14 @@ final class SpeedCameraMonitor: ObservableObject {
 
     @Published private(set) var nearestApproaching: Approaching?
 
-    private let cameras: [SpeedCamera]
-
-    init(cameras: [SpeedCamera] = SpeedCameraStore.helsinki,
-         alertRadiusMeters: CLLocationDistance = 1000) {
-        self.cameras = cameras
+    init(alertRadiusMeters: CLLocationDistance = 1000) {
         self.alertRadiusMeters = alertRadiusMeters
     }
 
-    /// Update with the vehicle's current location. Recomputes the nearest
-    /// camera within `alertRadiusMeters` (if any) and publishes it.
-    func update(vehicle coord: CLLocationCoordinate2D) {
+    /// Update with the current camera list + vehicle location. Cameras
+    /// are supplied per-call so we can swap data sources (mock list vs
+    /// live OSM/Overpass) without re-wiring the monitor.
+    func update(cameras: [SpeedCamera], vehicle coord: CLLocationCoordinate2D) {
         let here = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
         let nearest = cameras
             .map { cam -> (SpeedCamera, CLLocationDistance) in

@@ -5,6 +5,7 @@ import CoreLocation
 
 struct MapTabView: View {
     @EnvironmentObject private var location: LocationService
+    @EnvironmentObject private var traffic: TrafficIncidentService
     @StateObject private var vm = MapViewModel()
     @StateObject private var completer = SearchCompleter()
     @State private var searchText: String = ""
@@ -46,6 +47,7 @@ struct MapTabView: View {
             MapBackground(
                 region: $vm.region,
                 routePolyline: vm.routePolyline,
+                incidents: traffic.incidents,
                 followMode: followMode,
                 showsUser: location.isAuthorized,
                 onUserInteraction: { followMode = .none }
@@ -687,6 +689,7 @@ final class MapViewModel: ObservableObject {
 private struct MapBackground: UIViewRepresentable {
     @Binding var region: MKCoordinateRegion
     let routePolyline: MKPolyline?
+    let incidents: [TrafficIncident]
     let followMode: MapTabView.FollowMode
     let showsUser: Bool
     let onUserInteraction: () -> Void
@@ -768,6 +771,22 @@ private struct MapBackground: UIViewRepresentable {
         if let p = routePolyline {
             uiView.addOverlay(p, level: .aboveRoads)
         }
+
+        // Incident pins — diff by situationId so existing pins don't flicker
+        // on each refresh.
+        let existing = uiView.annotations.compactMap { $0 as? TrafficIncidentAnnotation }
+        let existingIds = Set(existing.map(\.situationId))
+        let incomingIds = Set(incidents.map(\.situationId))
+
+        // Remove gone-away annotations
+        let toRemove = existing.filter { !incomingIds.contains($0.situationId) }
+        if !toRemove.isEmpty { uiView.removeAnnotations(toRemove) }
+
+        // Add newly-arrived annotations
+        let toAdd = incidents
+            .filter { !existingIds.contains($0.situationId) }
+            .map { TrafficIncidentAnnotation(incident: $0) }
+        if !toAdd.isEmpty { uiView.addAnnotations(toAdd) }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -806,6 +825,54 @@ private struct MapBackground: UIViewRepresentable {
             }
             return MKOverlayRenderer(overlay: overlay)
         }
+
+        func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            // Leave the blue user-location dot as Apple's default
+            if annotation is MKUserLocation { return nil }
+
+            guard let inc = annotation as? TrafficIncidentAnnotation else { return nil }
+            let reuseId = "TrafficIncident"
+            let view: MKMarkerAnnotationView
+            if let existing = mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? MKMarkerAnnotationView {
+                view = existing
+                view.annotation = annotation
+            } else {
+                view = MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
+            }
+            view.markerTintColor = inc.markerColor
+            view.glyphImage = UIImage(systemName: inc.glyphSymbol)
+            view.canShowCallout = true
+            view.titleVisibility = .visible
+            return view
+        }
+    }
+}
+
+// MARK: - Traffic incident MKAnnotation wrapper
+
+private final class TrafficIncidentAnnotation: NSObject, MKAnnotation {
+    let situationId: String
+    let coordinate: CLLocationCoordinate2D
+    let title: String?
+    let subtitle: String?
+    let markerColor: UIColor
+    let glyphSymbol: String
+
+    init(incident: TrafficIncident) {
+        self.situationId = incident.situationId
+        self.coordinate = incident.coordinate
+        self.title = incident.headline
+        self.subtitle = incident.detail
+        switch incident.severity {
+        case .minor:    self.markerColor = UIColor(SQ5Colors.warning)
+        case .major:    self.markerColor = UIColor(SQ5Colors.warning)
+        case .critical: self.markerColor = UIColor(SQ5Colors.danger)
+        }
+        switch incident.category {
+        case .accident: self.glyphSymbol = "exclamationmark.triangle.fill"
+        case .closure:  self.glyphSymbol = "xmark.octagon.fill"
+        }
+        super.init()
     }
 }
 
