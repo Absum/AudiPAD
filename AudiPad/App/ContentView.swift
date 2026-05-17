@@ -85,7 +85,7 @@ private enum AlertPlacement {
     /// Top padding applied for `.top` placement — clears TopBar + search field.
     var topPadding: CGFloat {
         switch self {
-        case .top:    return 110
+        case .top:    return 120
         case .bottom: return 0
         }
     }
@@ -94,7 +94,7 @@ private enum AlertPlacement {
     var bottomPadding: CGFloat {
         switch self {
         case .top:    return 0
-        case .bottom: return 24
+        case .bottom: return 14
         }
     }
 }
