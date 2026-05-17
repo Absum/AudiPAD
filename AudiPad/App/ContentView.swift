@@ -29,7 +29,10 @@ struct ContentView: View {
                 if let approach = cameras.nearestApproaching {
                     SpeedCameraAlertBanner(approach: approach)
                         .padding(.horizontal, 24)
-                        .padding(.bottom, 24)
+                        // Sits above the Home now-playing strip when both are
+                        // visible; floats a bit higher than the bottom edge on
+                        // other tabs — consistent across the app.
+                        .padding(.bottom, 110)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                         .zIndex(10)
                 }

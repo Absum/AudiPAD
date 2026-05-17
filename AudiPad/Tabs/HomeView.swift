@@ -107,10 +107,88 @@ struct HomeView: View {
                     }
                 }
                 .padding(.horizontal, 20)
-                .padding(.bottom, 22)
+                .padding(.bottom, 12)
+
+                // Now-playing strip — fills the space at the bottom of Home.
+                // Mock data for now; wires up to MPNowPlayingInfoCenter later.
+                NowPlayingStrip()
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 18)
             }
         }
         .onAppear { vehicle.start() }
+    }
+}
+
+// MARK: - Now playing strip (Home bottom)
+
+private struct NowPlayingStrip: View {
+    // Mock state — replaced by `MPNowPlayingInfoCenter` once the Media tab's
+    // remote-command integration lands.
+    private let title = "Forge"
+    private let artist = "Justice"
+    private let isPlaying = true
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Rectangle()
+                .fill(SQ5Colors.aluminum.opacity(0.22))
+                .frame(height: 1)
+                .padding(.horizontal, 14)
+
+            HStack(spacing: 14) {
+                // Album art (placeholder)
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(SQ5Colors.surfaceElevated)
+                    .frame(width: 52, height: 52)
+                    .overlay(
+                        Image(systemName: "music.note")
+                            .font(.system(size: 22, weight: .light))
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(SQ5Colors.border, lineWidth: 1)
+                    )
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("NOW PLAYING")
+                        .font(.system(size: 9, weight: .semibold))
+                        .tracking(1.8)
+                        .foregroundStyle(SQ5Colors.textTertiary)
+                    Text(title)
+                        .font(SQ5Typography.subtitle)
+                        .foregroundStyle(SQ5Colors.textPrimary)
+                        .lineLimit(1)
+                    Text(artist)
+                        .font(SQ5Typography.caption)
+                        .foregroundStyle(SQ5Colors.textSecondary)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: 22) {
+                    TransportIcon(symbol: "backward.fill", size: 22)
+                    TransportIcon(symbol: isPlaying ? "pause.fill" : "play.fill", size: 30)
+                    TransportIcon(symbol: "forward.fill", size: 22)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+        }
+    }
+}
+
+private struct TransportIcon: View {
+    let symbol: String
+    let size: CGFloat
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: size, weight: .semibold))
+            .foregroundStyle(SQ5Colors.textPrimary)
+            .frame(width: size + 18, height: size + 18)
+            .contentShape(Rectangle())
     }
 }
 
