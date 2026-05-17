@@ -22,48 +22,48 @@ struct HomeView: View {
                     .frame(height: 1)
 
                 // Hero gauges with small Boost gauge in between (Audi S-line cluster style)
-                HStack(spacing: 14) {
-                    ZStack(alignment: .topTrailing) {
+                // and the speed-limit sign centered above the whole cluster.
+                ZStack(alignment: .top) {
+                    HStack(spacing: 14) {
                         SQ5Gauge(value: 87,
                                  minValue: 0,
                                  maxValue: 240,
                                  label: "Speed",
                                  unit: "km/h",
                                  majorStep: 20)
+                            .frame(maxWidth: .infinity)
 
-                        // Audi-VC-style current speed-limit indicator
-                        TrafficSignView(sign: currentSpeedLimit)
-                            .frame(width: 64, height: 64)
-                            .shadow(color: .black.opacity(0.55), radius: 6, x: 0, y: 2)
-                            .padding(.top, 10)
-                            .padding(.trailing, 18)
-                            .accessibilityLabel("Current speed limit")
+                        // Small boost gauge (3.0 TDI biturbo: ~0–2.5 bar, redline ~2.0)
+                        SQ5Gauge(value: 1.4,
+                                 minValue: 0,
+                                 maxValue: 2.5,
+                                 label: "Boost",
+                                 unit: "bar",
+                                 redlineStart: 2.0,
+                                 majorStep: 0.5,
+                                 minorBetween: 1,
+                                 formatter: { String(format: "%.1f", $0) })
+                            .frame(width: 210)
+
+                        SQ5Gauge(value: 2400,
+                                 minValue: 0,
+                                 maxValue: 7000,
+                                 label: "RPM",
+                                 unit: nil,
+                                 redlineStart: 4500,
+                                 majorStep: 1000)
+                            .frame(maxWidth: .infinity)
                     }
-                    .frame(maxWidth: .infinity)
 
-                    // Small boost gauge (3.0 TDI biturbo: ~0–2.5 bar, redline ~2.0)
-                    SQ5Gauge(value: 1.4,
-                             minValue: 0,
-                             maxValue: 2.5,
-                             label: "Boost",
-                             unit: "bar",
-                             redlineStart: 2.0,
-                             majorStep: 0.5,
-                             minorBetween: 1,
-                             formatter: { String(format: "%.1f", $0) })
-                        .frame(width: 210)
-
-                    SQ5Gauge(value: 2400,
-                             minValue: 0,
-                             maxValue: 7000,
-                             label: "RPM",
-                             unit: nil,
-                             redlineStart: 4500,
-                             majorStep: 1000)
-                        .frame(maxWidth: .infinity)
+                    // Centered speed-limit sign popping above the cluster top
+                    TrafficSignView(sign: currentSpeedLimit)
+                        .frame(width: 70, height: 70)
+                        .shadow(color: .black.opacity(0.7), radius: 10, x: 0, y: 4)
+                        .padding(.top, -8)
+                        .accessibilityLabel("Current speed limit")
                 }
                 .padding(.horizontal, 20)
-                .padding(.top, 14)
+                .padding(.top, 18)
                 .padding(.bottom, 6)
 
                 // Recently detected signs

@@ -72,8 +72,10 @@ struct BrandBar: View {
         HStack(spacing: 16) {
             Image("Wordmark")
                 .resizable()
+                .renderingMode(.template)
                 .aspectRatio(contentMode: .fit)
                 .frame(height: 24)
+                .foregroundStyle(SQ5Colors.accent)
 
             Rectangle()
                 .fill(SQ5Colors.aluminum.opacity(0.45))
