@@ -6,6 +6,7 @@ import CoreLocation
 struct MapTabView: View {
     @EnvironmentObject private var location: LocationService
     @EnvironmentObject private var traffic: TrafficIncidentService
+    @EnvironmentObject private var cameraService: SpeedCameraService
     @StateObject private var vm = MapViewModel()
     @StateObject private var completer = SearchCompleter()
     @State private var searchText: String = ""
@@ -48,6 +49,7 @@ struct MapTabView: View {
                 region: $vm.region,
                 routePolyline: vm.routePolyline,
                 incidents: traffic.incidents,
+                cameras: cameraService.cameras,
                 followMode: followMode,
                 showsUser: location.isAuthorized,
                 onUserInteraction: { followMode = .none }
@@ -690,6 +692,7 @@ private struct MapBackground: UIViewRepresentable {
     @Binding var region: MKCoordinateRegion
     let routePolyline: MKPolyline?
     let incidents: [TrafficIncident]
+    let cameras: [SpeedCamera]
     let followMode: MapTabView.FollowMode
     let showsUser: Bool
     let onUserInteraction: () -> Void
@@ -774,19 +777,26 @@ private struct MapBackground: UIViewRepresentable {
 
         // Incident pins — diff by situationId so existing pins don't flicker
         // on each refresh.
-        let existing = uiView.annotations.compactMap { $0 as? TrafficIncidentAnnotation }
-        let existingIds = Set(existing.map(\.situationId))
-        let incomingIds = Set(incidents.map(\.situationId))
-
-        // Remove gone-away annotations
-        let toRemove = existing.filter { !incomingIds.contains($0.situationId) }
-        if !toRemove.isEmpty { uiView.removeAnnotations(toRemove) }
-
-        // Add newly-arrived annotations
-        let toAdd = incidents
-            .filter { !existingIds.contains($0.situationId) }
+        let existingIncidents = uiView.annotations.compactMap { $0 as? TrafficIncidentAnnotation }
+        let existingIncidentIds = Set(existingIncidents.map(\.situationId))
+        let incomingIncidentIds = Set(incidents.map(\.situationId))
+        let incidentsToRemove = existingIncidents.filter { !incomingIncidentIds.contains($0.situationId) }
+        if !incidentsToRemove.isEmpty { uiView.removeAnnotations(incidentsToRemove) }
+        let incidentsToAdd = incidents
+            .filter { !existingIncidentIds.contains($0.situationId) }
             .map { TrafficIncidentAnnotation(incident: $0) }
-        if !toAdd.isEmpty { uiView.addAnnotations(toAdd) }
+        if !incidentsToAdd.isEmpty { uiView.addAnnotations(incidentsToAdd) }
+
+        // Camera pins — same diff strategy, keyed by stable camera ID
+        let existingCameras = uiView.annotations.compactMap { $0 as? SpeedCameraAnnotation }
+        let existingCameraIds = Set(existingCameras.map(\.cameraId))
+        let incomingCameraIds = Set(cameras.map(\.id))
+        let camerasToRemove = existingCameras.filter { !incomingCameraIds.contains($0.cameraId) }
+        if !camerasToRemove.isEmpty { uiView.removeAnnotations(camerasToRemove) }
+        let camerasToAdd = cameras
+            .filter { !existingCameraIds.contains($0.id) }
+            .map { SpeedCameraAnnotation(camera: $0) }
+        if !camerasToAdd.isEmpty { uiView.addAnnotations(camerasToAdd) }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -830,21 +840,65 @@ private struct MapBackground: UIViewRepresentable {
             // Leave the blue user-location dot as Apple's default
             if annotation is MKUserLocation { return nil }
 
-            guard let inc = annotation as? TrafficIncidentAnnotation else { return nil }
-            let reuseId = "TrafficIncident"
-            let view: MKMarkerAnnotationView
-            if let existing = mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? MKMarkerAnnotationView {
-                view = existing
+            if let inc = annotation as? TrafficIncidentAnnotation {
+                let reuseId = "TrafficIncident"
+                let view = (mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? MKMarkerAnnotationView)
+                    ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
                 view.annotation = annotation
-            } else {
-                view = MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
+                view.markerTintColor = inc.markerColor
+                view.glyphImage = UIImage(systemName: inc.glyphSymbol)
+                view.canShowCallout = true
+                view.titleVisibility = .visible
+                view.displayPriority = .required
+                return view
             }
-            view.markerTintColor = inc.markerColor
-            view.glyphImage = UIImage(systemName: inc.glyphSymbol)
-            view.canShowCallout = true
-            view.titleVisibility = .visible
-            return view
+
+            if let cam = annotation as? SpeedCameraAnnotation {
+                let reuseId = "SpeedCamera"
+                let view = (mapView.dequeueReusableAnnotationView(withIdentifier: reuseId) as? MKMarkerAnnotationView)
+                    ?? MKMarkerAnnotationView(annotation: annotation, reuseIdentifier: reuseId)
+                view.annotation = annotation
+                view.markerTintColor = UIColor(SQ5Colors.accent)
+                view.glyphImage = UIImage(systemName: cam.glyphSymbol)
+                view.canShowCallout = true
+                view.titleVisibility = .visible
+                // Make camera pins smaller / more subtle than incident pins so
+                // they don't drown the map. Default markers are full-size; we
+                // shrink a little.
+                view.transform = CGAffineTransform(scaleX: 0.78, y: 0.78)
+                view.displayPriority = .defaultHigh
+                return view
+            }
+
+            return nil
         }
+    }
+}
+
+// MARK: - Speed camera MKAnnotation wrapper
+
+private final class SpeedCameraAnnotation: NSObject, MKAnnotation {
+    let cameraId: UUID
+    let coordinate: CLLocationCoordinate2D
+    let title: String?
+    let subtitle: String?
+    let glyphSymbol: String
+
+    init(camera: SpeedCamera) {
+        self.cameraId = camera.id
+        self.coordinate = camera.coordinate
+        self.title = "\(camera.speedLimit) km/h"
+        switch camera.kind {
+        case .fixed:        self.subtitle = "Speed camera"
+        case .mobile:       self.subtitle = "Mobile camera"
+        case .averageSpeed: self.subtitle = "Average-speed zone"
+        }
+        switch camera.kind {
+        case .fixed:        self.glyphSymbol = "camera.fill"
+        case .mobile:       self.glyphSymbol = "car.2.fill"
+        case .averageSpeed: self.glyphSymbol = "timer"
+        }
+        super.init()
     }
 }
 

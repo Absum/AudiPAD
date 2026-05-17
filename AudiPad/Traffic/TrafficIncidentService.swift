@@ -57,10 +57,11 @@ final class TrafficIncidentService: ObservableObject {
             var request = URLRequest(url: Self.endpoint)
             request.setValue("AudiPad/0.1 (github.com/Absum/AudiPAD)", forHTTPHeaderField: "User-Agent")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.timeoutInterval = 30
             let (data, response) = try await URLSession.shared.data(for: request)
 
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                self.lastError = "HTTP \(http.statusCode)"
+                self.lastError = "HTTP \(http.statusCode) (\(data.count) bytes)"
                 return
             }
 
@@ -81,8 +82,20 @@ final class TrafficIncidentService: ObservableObject {
             self.lastUpdated = now
             self.lastError = nil
             saveCache(parsed)
+        } catch let decodingError as DecodingError {
+            self.lastError = "Decode: \(Self.describe(decodingError))"
         } catch {
-            self.lastError = error.localizedDescription
+            self.lastError = "Network: \(error.localizedDescription)"
+        }
+    }
+
+    private static func describe(_ err: DecodingError) -> String {
+        switch err {
+        case .dataCorrupted(let ctx):       return "dataCorrupted at \(ctx.codingPath.map(\.stringValue).joined(separator: ".")) — \(ctx.debugDescription)"
+        case .keyNotFound(let key, let ctx): return "keyNotFound '\(key.stringValue)' at \(ctx.codingPath.map(\.stringValue).joined(separator: "."))"
+        case .typeMismatch(let type, let ctx): return "typeMismatch \(type) at \(ctx.codingPath.map(\.stringValue).joined(separator: "."))"
+        case .valueNotFound(let type, let ctx): return "valueNotFound \(type) at \(ctx.codingPath.map(\.stringValue).joined(separator: "."))"
+        @unknown default: return "unknown decode error"
         }
     }
 
@@ -120,8 +133,28 @@ final class TrafficIncidentService: ObservableObject {
 
 /// Minimal `Codable` shape covering the bits of the Digitraffic feed
 /// we actually use. The real schema is huge — we ignore most of it.
+/// Per-feature decoding is wrapped in `FailableDecodable` so malformed
+/// or unexpected features (e.g. Polygon geometries, missing required
+/// fields) are silently skipped instead of failing the whole response.
 private struct DigitrafficResponse: Decodable {
     let features: [DigitrafficFeature]
+
+    enum CodingKeys: String, CodingKey { case features }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = try c.decode([FailableDecodable<DigitrafficFeature>].self, forKey: .features)
+        self.features = raw.compactMap(\.value)
+    }
+}
+
+/// Wrapper that yields `nil` instead of throwing when its inner type
+/// fails to decode. Lets us tolerate junk entries in an array.
+private struct FailableDecodable<T: Decodable>: Decodable {
+    let value: T?
+    init(from decoder: Decoder) throws {
+        self.value = try? T(from: decoder)
+    }
 }
 
 private struct DigitrafficFeature: Decodable {
@@ -131,8 +164,18 @@ private struct DigitrafficFeature: Decodable {
 
 private struct DigitrafficGeometry: Decodable {
     let type: String
-    /// For `Point`: `[lon, lat]`. For other geometries we skip the feature.
+    /// For `Point`: `[lon, lat]`. For other geometry types we leave this
+    /// nil and the feature is skipped at the mapping step. Decoder is
+    /// tolerant: tries `[Double]` first, otherwise stores nil.
     let coordinates: [Double]?
+
+    enum CodingKeys: String, CodingKey { case type, coordinates }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = try c.decode(String.self, forKey: .type)
+        self.coordinates = try? c.decode([Double].self, forKey: .coordinates)
+    }
 }
 
 private struct DigitrafficProperties: Decodable {
