@@ -1,7 +1,8 @@
 import SwiftUI
 
 struct HomeView: View {
-    // Mock state. Replaced by live OBD/CV data once those layers land.
+    @StateObject private var vehicle = VehicleViewModel()
+
     private let currentSpeedLimit: TrafficSign = .speedLimit(80)
     private let recentSigns: [TrafficSign] = [
         .speedLimit(80),
@@ -29,7 +30,9 @@ struct HomeView: View {
                     Spacer()
 
                     StatusPill(symbol: "thermometer.medium", value: "23°", caption: "AIR")
-                    StatusPill(symbol: "fuelpump.fill",      value: "65%", caption: "FUEL")
+                    StatusPill(symbol: "fuelpump.fill",
+                               value: "\(Int(vehicle.snapshot.fuelPercent.rounded()))%",
+                               caption: "FUEL")
                     Text(Date().formatted(date: .omitted, time: .shortened))
                         .font(SQ5Typography.subtitle)
                         .foregroundStyle(SQ5Colors.textSecondary)
@@ -39,12 +42,11 @@ struct HomeView: View {
                 .padding(.top, 24)
                 .padding(.bottom, 8)
 
-                // Gauge cluster (Audi-S line: large outer + small center boost), with the
-                // current speed-limit sign centered above and the "SQ5" brand mark below
-                // the boost gauge.
+                // Hero gauges with small Boost gauge in between (Audi S-line cluster style)
+                // and the speed-limit sign centered above the whole cluster.
                 ZStack(alignment: .top) {
                     HStack(spacing: 14) {
-                        SQ5Gauge(value: 87,
+                        SQ5Gauge(value: vehicle.snapshot.speedKph,
                                  minValue: 0,
                                  maxValue: 240,
                                  label: "Speed",
@@ -56,7 +58,7 @@ struct HomeView: View {
                         // peak ~1.9–2.2 bar absolute (≈ 0.9–1.2 bar gauge/relative).
                         // Range 0–2.5 absolute with redline at 2.0; OBD reports
                         // absolute, so this matches what the live PID will feed in.
-                        SQ5Gauge(value: 1.8,
+                        SQ5Gauge(value: vehicle.snapshot.boostBar,
                                  minValue: 0,
                                  maxValue: 2.5,
                                  label: "Boost",
@@ -67,7 +69,7 @@ struct HomeView: View {
                                  formatter: { String(format: "%.1f", $0) })
                             .frame(width: 210)
 
-                        SQ5Gauge(value: 2400,
+                        SQ5Gauge(value: vehicle.snapshot.rpm,
                                  minValue: 0,
                                  maxValue: 7000,
                                  label: "RPM",
@@ -101,19 +103,28 @@ struct HomeView: View {
                         .padding(.horizontal, 14)
 
                     HStack(spacing: 0) {
-                        KpiCell(label: "Range",   value: "624", unit: "km",
+                        KpiCell(label: "Range",
+                                value: "\(Int(vehicle.snapshot.rangeKm.rounded()))",
+                                unit: "km",
                                 symbol: "fuelpump")
                         KpiDivider()
-                        KpiCell(label: "Avg",     value: "8.2", unit: "L/100",
+                        KpiCell(label: "Avg",
+                                value: String(format: "%.1f", vehicle.snapshot.avgConsumption),
+                                unit: "L/100",
                                 symbol: "chart.bar")
                         KpiDivider()
-                        KpiCell(label: "Now",     value: "6.7", unit: "L/100",
+                        KpiCell(label: "Now",
+                                value: String(format: "%.1f", vehicle.snapshot.nowConsumption),
+                                unit: "L/100",
                                 symbol: "drop.fill")
                         KpiDivider()
-                        KpiCell(label: "Gear",    value: "D5",
+                        KpiCell(label: "Gear",
+                                value: vehicle.snapshot.gear,
                                 symbol: "gearshift.layout.sixspeed")
                         KpiDivider()
-                        KpiCell(label: "Coolant", value: "92",  unit: "°C",
+                        KpiCell(label: "Coolant",
+                                value: "\(Int(vehicle.snapshot.coolantC.rounded()))",
+                                unit: "°C",
                                 symbol: "thermometer.medium")
                     }
                 }
@@ -121,6 +132,8 @@ struct HomeView: View {
                 .padding(.bottom, 22)
             }
         }
+        .onAppear { vehicle.start() }
+        .onDisappear { vehicle.stop() }
     }
 }
 
