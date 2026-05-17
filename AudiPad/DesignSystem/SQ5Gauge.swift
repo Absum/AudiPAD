@@ -89,7 +89,9 @@ struct SQ5Gauge: View {
                           minorBetween: minorBetween,
                           diameter: arcDiameter + strokeWidth * 2)
 
-                // Center readout — value morphs between numerics instead of snapping.
+                // Center readout — text snaps quietly between values (no
+                // digit-morphing animation; the morphing reads as distracting
+                // motion at glance distance while driving).
                 VStack(spacing: side * 0.012) {
                     Text(formatter(value))
                         .font(.system(size: side * 0.24, weight: .light, design: .default))
@@ -97,8 +99,6 @@ struct SQ5Gauge: View {
                         .monospacedDigit()
                         .minimumScaleFactor(0.5)
                         .lineLimit(1)
-                        .contentTransition(.numericText())
-                        .animation(.easeOut(duration: 0.35), value: value)
                     if let unit {
                         Text(unit)
                             .font(.system(size: side * 0.07, weight: .medium))

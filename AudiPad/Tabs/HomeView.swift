@@ -48,7 +48,7 @@ struct HomeView: View {
                                  minorBetween: 1,
                                  formatter: { String(format: "%.1f", $0) })
                             .frame(width: 210)
-                            .padding(.top, 20)
+                            .padding(.top, 40)
 
                         SQ5Gauge(value: vehicle.snapshot.rpm,
                                  minValue: 0,

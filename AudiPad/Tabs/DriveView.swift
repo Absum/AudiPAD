@@ -146,8 +146,6 @@ private struct HeroStat: View {
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
-                    .contentTransition(.numericText())
-                    .animation(.easeOut(duration: 0.35), value: value)
                 Text(unit)
                     .font(SQ5Typography.subtitle)
                     .foregroundStyle(SQ5Colors.textSecondary)
@@ -192,8 +190,6 @@ private struct ReadingCell: View {
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
-                    .contentTransition(.numericText())
-                    .animation(.easeOut(duration: 0.3), value: value)
                 if let unit {
                     Text(unit)
                         .font(.system(size: 11, weight: .medium))
