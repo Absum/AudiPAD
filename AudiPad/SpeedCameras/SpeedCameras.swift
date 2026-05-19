@@ -1,6 +1,7 @@
 import Foundation
 import CoreLocation
 import SwiftUI
+import UIKit
 
 // MARK: - Model
 
@@ -62,6 +63,25 @@ final class SpeedCameraMonitor: ObservableObject {
     struct Approaching: Equatable {
         let camera: SpeedCamera
         let distanceMeters: CLLocationDistance
+        /// The user's current speed in km/h at the moment this snapshot
+        /// was produced. Used by the banner to render the over-limit
+        /// state (red accent + "SLOW DOWN" headline + haptic).
+        let userSpeedKph: Double
+        /// The monitor's alert radius, carried along so the banner can
+        /// render the distance progress bar (1.0 at the radius, 0 at
+        /// the camera) without needing a reference to the monitor.
+        let alertRadiusMeters: CLLocationDistance
+
+        var isOverLimit: Bool {
+            userSpeedKph > Double(camera.speedLimit)
+        }
+
+        /// Fraction of the alert radius still ahead of the user, in
+        /// `[0, 1]`. Drives the depleting bar at the bottom of the banner.
+        var distanceProgress: Double {
+            guard alertRadiusMeters > 0 else { return 0 }
+            return max(0, min(1, distanceMeters / alertRadiusMeters))
+        }
     }
 
     /// Alert when within this many meters of any camera.
@@ -100,42 +120,78 @@ final class SpeedCameraMonitor: ObservableObject {
     /// Update with the current camera list + the user's full CLLocation
     /// (we need speed + course, not just the coordinate). All gates
     /// must pass — distance, motion, heading-toward, optionally
-    /// camera-facing, and optionally same-road — for an alert to
-    /// surface.
+    /// camera-facing, and same-road — for an alert to surface.
     ///
     /// `linkID` is an optional snapper closure (typically backed by
-    /// `RoadSpeedLimitService.linkID(near:)`). When both user and
-    /// camera resolve to non-nil link IDs and they differ, the camera
-    /// is suppressed. If either snap is nil (no Digiroad data near
-    /// that point) we don't penalize — heading + facing carry the load.
+    /// `RoadSpeedLimitService.linkID(near:)`). When the user resolves
+    /// to a link, we require the camera to also resolve and match. A
+    /// camera that doesn't resolve is treated as "different road" —
+    /// otherwise we'd silently bypass the gate every time a camera sits
+    /// >30 m from any cached road vertex (parallel road, side street
+    /// outside the bbox, OSM coord with pole offset, …) which produces
+    /// the "alerting for the next road over" false-positive.
+    ///
+    /// When the *user* doesn't snap (no Digiroad coverage where they
+    /// are), we skip the gate entirely and lean on heading + facing.
     func update(cameras: [SpeedCamera],
                 userLocation loc: CLLocation,
-                linkID: ((CLLocationCoordinate2D) -> String?)? = nil) {
+                linkID: ((CLLocationCoordinate2D, Double?) -> String?)? = nil) {
+
+        // Resolve the user's road link once. We pass the user's course so
+        // the snap prefers segments aligned with the direction of travel —
+        // critical at intersections where the nearest vertex might belong
+        // to a perpendicular road.
+        let userCourse: Double? = loc.course >= 0 ? loc.course : nil
+        let userLinkId = linkID?(loc.coordinate, userCourse)
+        // Live user speed in km/h, clamped (CLLocation.speed is m/s,
+        // -1 when invalid). Carried into Approaching so the banner can
+        // render the over-limit state without a separate plumbing path.
+        let userSpeedKph = max(0, loc.speed) * 3.6
 
         // Sticky continuation: if we're already alerting a camera, keep
-        // showing it (with the live distance) until we leave the radius.
-        // The driver has been notified — they need the distance to count
-        // down through zero and a moment past, not vanish mid-approach.
+        // showing it (with the live distance) until one of:
+        //   - we leave the alert radius,
+        //   - the user moves to a different road,
+        //   - the user drives past the camera (bearing flips behind us).
+        // The first two avoid blinking out the moment you pass and avoid
+        // a camera "following" you onto the parallel road. The third
+        // prevents the "distance ticks up while I drive away from it"
+        // bug — once the camera is behind us it's no longer a warning.
         if let stickyID = stickyCameraID,
            let stuck = cameras.first(where: { $0.id == stickyID }) {
             let camLoc = CLLocation(latitude: stuck.coordinate.latitude,
                                     longitude: stuck.coordinate.longitude)
             let dist = loc.distance(from: camLoc)
-            if dist <= alertRadiusMeters {
-                let next = Approaching(camera: stuck, distanceMeters: dist)
+            let stillSameRoad = sameRoadAs(stuck, userLink: userLinkId, snap: linkID)
+            // "Passed" = bearing from user→camera is now > 90° off the
+            // user's course. The approach cone was ±45° on entry, so a
+            // delta past 90° means the camera is to our side/rear, not
+            // ahead. Skip the test when course is invalid (stopped /
+            // momentarily lost lock) so a stale course doesn't dismiss.
+            let passed: Bool = {
+                guard loc.course >= 0 else { return false }
+                let bearing = Self.bearing(from: loc.coordinate, to: stuck.coordinate)
+                return Self.angularDelta(loc.course, bearing) > 90
+            }()
+            if dist <= alertRadiusMeters && stillSameRoad && !passed {
+                let next = Approaching(camera: stuck,
+                                       distanceMeters: dist,
+                                       userSpeedKph: userSpeedKph,
+                                       alertRadiusMeters: alertRadiusMeters)
                 if next != nearestApproaching { nearestApproaching = next }
                 return
             }
-            // Out of radius → driver has cleared the camera. Drop sticky
-            // and fall through to entry-gate evaluation for the next one.
+            // Out of radius, turned off the road, or driven past → drop
+            // sticky and fall through to entry-gate evaluation for the
+            // next camera.
             stickyCameraID = nil
         }
 
         // Entry gates — all must pass for a *new* camera to start alerting.
 
-        // Speed gate. CLLocation.speed is m/s; -1 when invalid.
-        let speedKph = max(0, loc.speed) * 3.6
-        guard speedKph >= minSpeedKph else {
+        // Speed gate. Reuses userSpeedKph computed above (CLLocation.speed
+        // in m/s, -1 → 0 here).
+        guard userSpeedKph >= minSpeedKph else {
             if nearestApproaching != nil { nearestApproaching = nil }
             return
         }
@@ -147,11 +203,6 @@ final class SpeedCameraMonitor: ObservableObject {
             return
         }
         let course = loc.course
-
-        // Resolve the user's road link once (instead of per-camera). nil
-        // means "no Digiroad data within snap radius" — same-road gate
-        // is skipped entirely in that case.
-        let userLinkId = linkID?(loc.coordinate)
 
         let nearest = cameras
             .compactMap { cam -> (SpeedCamera, CLLocationDistance)? in
@@ -179,13 +230,8 @@ final class SpeedCameraMonitor: ObservableObject {
                     }
                 }
 
-                // Same-road via Digiroad link snap. Only enforced when
-                // both ends resolve — missing data must not silence
-                // legitimate alerts on roads outside the cached bbox.
-                if let snap = linkID,
-                   let userLink = userLinkId,
-                   let camLink = snap(cam.coordinate),
-                   userLink != camLink {
+                // Same-road gate — strict when the user has a known link.
+                guard sameRoadAs(cam, userLink: userLinkId, snap: linkID) else {
                     return nil
                 }
 
@@ -193,13 +239,31 @@ final class SpeedCameraMonitor: ObservableObject {
             }
             .min(by: { $0.1 < $1.1 })
 
-        let next = nearest.map { Approaching(camera: $0.0, distanceMeters: $0.1) }
+        let next = nearest.map {
+            Approaching(camera: $0.0,
+                        distanceMeters: $0.1,
+                        userSpeedKph: userSpeedKph,
+                        alertRadiusMeters: alertRadiusMeters)
+        }
         if next != nearestApproaching {
             nearestApproaching = next
         }
         // Engage stickiness as soon as a camera enters the alert state, so
         // the next .update keeps showing it past the heading flip.
         stickyCameraID = nearest?.0.id
+    }
+
+    /// Same-road gate. Strict when the user resolves to a Digiroad link:
+    /// the camera must resolve to the same link. Permissive when the
+    /// user doesn't resolve — areas outside Digiroad coverage fall back
+    /// to heading + facing.
+    private func sameRoadAs(_ cam: SpeedCamera,
+                            userLink: String?,
+                            snap: ((CLLocationCoordinate2D, Double?) -> String?)?) -> Bool {
+        guard let snap, let userLink else { return true }
+        // No course for the camera — it's a static point. We just want the
+        // closest road by edge geometry.
+        return snap(cam.coordinate, nil) == userLink
     }
 
     // MARK: - Geometry helpers
@@ -231,56 +295,101 @@ final class SpeedCameraMonitor: ObservableObject {
 struct SpeedCameraAlertBanner: View {
     let approach: SpeedCameraMonitor.Approaching
 
+    /// Color used for the icon background, border, and progress bar fill.
+    /// Switches to red when the user is over the camera's limit so the
+    /// banner reads as "do something now" rather than "FYI".
+    private var accentColor: Color {
+        approach.isOverLimit ? .red : SQ5Colors.accent
+    }
+
     var body: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                Circle()
-                    .fill(SQ5Colors.accent)
-                Image(systemName: kindSymbol)
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 42, height: 42)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(headline)
-                    .font(.system(size: 10, weight: .heavy))
-                    .tracking(2)
-                    .foregroundStyle(SQ5Colors.textPrimary)
-                HStack(spacing: 6) {
-                    Text("\(Int(approach.distanceMeters)) m")
-                        .font(SQ5Typography.subtitle)
-                        .foregroundStyle(SQ5Colors.textPrimary)
-                        .monospacedDigit()
-                    Text("·")
-                        .foregroundStyle(SQ5Colors.textTertiary)
-                    Text("\(approach.camera.speedLimit) km/h limit")
-                        .font(SQ5Typography.subtitle)
-                        .foregroundStyle(SQ5Colors.textSecondary)
-                        .monospacedDigit()
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(accentColor)
+                    Image(systemName: kindSymbol)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.white)
                 }
+                .frame(width: 42, height: 42)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(headline)
+                        .font(.system(size: 10, weight: .heavy))
+                        .tracking(2)
+                        .foregroundStyle(approach.isOverLimit ? .red : SQ5Colors.textPrimary)
+                    HStack(spacing: 6) {
+                        Text("\(Int(approach.distanceMeters)) m")
+                            .font(SQ5Typography.subtitle)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                            .monospacedDigit()
+                        Text("·")
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                        Text("\(approach.camera.speedLimit) km/h limit")
+                            .font(SQ5Typography.subtitle)
+                            .foregroundStyle(SQ5Colors.textSecondary)
+                            .monospacedDigit()
+                    }
+                }
+
+                Spacer(minLength: 12)
+
+                // Small speed-limit sign at the trailing edge for instant glance
+                TrafficSignView(sign: .speedLimit(approach.camera.speedLimit))
+                    .frame(width: 38, height: 38)
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
 
-            Spacer(minLength: 12)
-
-            // Small speed-limit sign at the trailing edge for instant glance
-            TrafficSignView(sign: .speedLimit(approach.camera.speedLimit))
-                .frame(width: 38, height: 38)
+            // Depleting distance bar — full at the alert radius, shrinks to
+            // zero at the camera. Animates with the published distance
+            // updates, giving the driver a glance-readable "how close am I"
+            // signal that complements the numeric "X m".
+            distanceBar
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(
+        .background(SQ5Colors.surface.opacity(0.96))
+        // Clipping the whole VStack to a rounded rect lets the bar at
+        // the bottom inherit the corner curve — simpler than per-corner
+        // rounding (which only exists from iOS 17 onward) and means the
+        // border below traces both the text row and the bar.
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(SQ5Colors.surface.opacity(0.96))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(SQ5Colors.accent, lineWidth: 1.5)
-                )
+                .stroke(accentColor, lineWidth: 1.5)
         )
         .shadow(color: .black.opacity(0.4), radius: 10, x: 0, y: 3)
+        .animation(.easeOut(duration: 0.3), value: approach.distanceProgress)
+        .animation(.easeOut(duration: 0.2), value: approach.isOverLimit)
+        // Single haptic at the moment the driver crosses from under to
+        // over the limit. We deliberately don't fire on the reverse
+        // transition (slowing back down is the correct response — no
+        // need to nag) and don't loop while over (one tap, not a buzz).
+        // iOS 16-compatible single-arg `onChange`.
+        .onChange(of: approach.isOverLimit) { nowOver in
+            guard nowOver else { return }
+            UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+        }
+    }
+
+    @ViewBuilder
+    private var distanceBar: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Rectangle()
+                    .fill(accentColor.opacity(0.18))
+                Rectangle()
+                    .fill(accentColor)
+                    .frame(width: geo.size.width * approach.distanceProgress)
+            }
+        }
+        .frame(height: 3)
     }
 
     private var headline: String {
+        if approach.isOverLimit {
+            return "SLOW DOWN — CAMERA AHEAD"
+        }
         switch approach.camera.kind {
         case .fixed:         return "SPEED CAMERA AHEAD"
         case .mobile:        return "MOBILE CAMERA AHEAD"

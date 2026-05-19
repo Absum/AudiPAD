@@ -69,11 +69,22 @@ final class AlertAudio: NSObject, ObservableObject {
     }
 
     private func announcement(for approach: SpeedCameraMonitor.Approaching) -> String {
-        let meters = Int(approach.distanceMeters)
         let limit = approach.camera.speedLimit
         // Finnish first because the driver is Finnish; AVSpeechSynthesisVoice
         // falls back to English at runtime if no FI voice is installed.
-        return "Nopeusvalvontakamera \(meters) metrin päässä. Rajoitus \(limit) kilometriä tunnissa."
+        //
+        // Distance is intentionally omitted from the spoken line — the
+        // banner shows it and the depleting bar tracks it live, while
+        // saying e.g. "kahdeksansataa metrin päässä" eats ~2 seconds of
+        // air time and dates the announcement the moment it's spoken.
+        // When the driver is over the limit at trigger time we lead with
+        // "Hidasta," (slow down) and also speak the limit — they need
+        // to know what to slow *to*. When already at/under, the short
+        // form is enough; the visual banner shows the limit.
+        if approach.isOverLimit {
+            return "Hidasta, nopeusvalvontakamera edessä. Rajoitus \(limit) kilometriä tunnissa."
+        }
+        return "Nopeusvalvontakamera edessä."
     }
 
     private func speak(line: String) {
