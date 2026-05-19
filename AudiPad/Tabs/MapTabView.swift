@@ -7,14 +7,41 @@ import CoreLocation
 struct MapTabView: View {
     @EnvironmentObject private var location: LocationService
     @EnvironmentObject private var traffic: TrafficIncidentService
+    @EnvironmentObject private var cameraMonitor: SpeedCameraMonitor
     @EnvironmentObject private var cameraService: SpeedCameraService
     @EnvironmentObject private var roadLimits: RoadSpeedLimitService
     @StateObject private var vm = MapViewModel()
     @StateObject private var controller = MapController()
+    @StateObject private var routeFollower = RouteFollower()
+    @StateObject private var navVoice = NavVoice()
     @StateObject private var completer = SearchCompleter()
     @State private var searchText: String = ""
     @State private var isSearching: Bool = false
+    /// Drives the search overlay visibility. False by default: the
+    /// map starts clean with just a small magnifying-glass button.
+    @State private var isSearchOpen: Bool = false
     @FocusState private var searchFocused: Bool
+
+    /// Whether the user has confirmed (tapped "Start") on the current
+    /// route. Until this is true, the maneuver banner stays hidden
+    /// and the bottom slot shows a destination-summary "OK" card.
+    /// Reset to false on every new destination pick; preserved across
+    /// reroutes so the driver isn't asked to confirm mid-drive.
+    @State private var routeStarted: Bool = false
+
+    @AppStorage(NavigatorSettings.showSpeedometerKey) private var showSpeedometer: Bool = true
+    @AppStorage(NavigatorSettings.showBoostGaugeKey) private var showBoostGauge: Bool = true
+
+    /// Re-route watchdog state. `offRouteSince` is the Date at which
+    /// the user first crossed the lateral-deviation threshold; if
+    /// they're still over the threshold `offRouteHoldSeconds` later,
+    /// we kick a reroute and reset. `isRerouting` debounces the
+    /// async calculation so we don't fire it again while a previous
+    /// reroute is still in flight.
+    @State private var offRouteSince: Date? = nil
+    @State private var isRerouting: Bool = false
+    private let offRouteThresholdMeters: CLLocationDistance = 40
+    private let offRouteHoldSeconds: TimeInterval = 5
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -36,14 +63,30 @@ struct MapTabView: View {
             .ignoresSafeArea(edges: .top)
             .allowsHitTesting(false)
 
-            // Bottom-left road info panel
+            // Bottom-left stack: stylised speedometer over road info panel
             VStack {
                 Spacer()
-                RoadInfoPanel(road: roadLimits.currentRoad,
-                              limit: roadLimits.current?.limit)
-                    .padding(.leading, 24)
-                    .padding(.bottom, vm.routeInfo == nil ? 26 : 150)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 12) {
+                    if showSpeedometer || showBoostGauge {
+                        HStack(alignment: .top, spacing: 12) {
+                            if showSpeedometer {
+                                SpeedometerCard(limitKph: roadLimits.current?.limit)
+                            }
+                            if showBoostGauge {
+                                BoostGaugeCard()
+                            }
+                        }
+                    }
+                    RoadInfoPanel(road: roadLimits.currentRoad,
+                                  limit: roadLimits.current?.limit)
+                }
+                .padding(.leading, 24)
+                // Bump the bottom inset only while the pre-start
+                // confirmation card is on screen — once the user
+                // taps Start the card disappears and the cluster can
+                // come back to its normal seated position.
+                .padding(.bottom, (vm.routeInfo != nil && !routeStarted) ? 180 : 26)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .ignoresSafeArea(edges: .bottom)
             .allowsHitTesting(false)
@@ -68,99 +111,190 @@ struct MapTabView: View {
                     onZoomOut:  { controller.zoomOut() }
                 )
                 .padding(.trailing, 24)
-                .padding(.bottom, vm.routeInfo == nil ? 26 : 150)
+                // Bump the bottom inset only while the pre-start
+                // confirmation card is on screen — once the user
+                // taps Start the card disappears and the cluster can
+                // come back to its normal seated position.
+                .padding(.bottom, (vm.routeInfo != nil && !routeStarted) ? 180 : 26)
                 .frame(maxWidth: .infinity, alignment: .trailing)
             }
             .ignoresSafeArea(edges: .bottom)
 
             VStack(spacing: 0) {
-                TopBar(showSpeed: true)
+                // The speedometer card already gives a prominent live
+                // readout on this tab, so we don't need the TopBar pill
+                // duplicating it.
+                TopBar(showSpeed: false)
 
-                // Search field
-                HStack(spacing: 10) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(SQ5Colors.textSecondary)
-
-                    TextField("Destination", text: $searchText)
-                        .font(SQ5Typography.body)
-                        .foregroundStyle(SQ5Colors.textPrimary)
-                        .submitLabel(.search)
-                        .autocorrectionDisabled(true)
-                        .textInputAutocapitalization(.never)
-                        .focused($searchFocused)
-                        .onSubmit { runDirectSearch() }
-                        .onChange(of: searchText) { newValue in
-                            completer.update(query: newValue, near: controller.currentRegion)
-                        }
-
-                    if isSearching {
-                        ProgressView()
-                            .tint(SQ5Colors.textTertiary)
-                            .scaleEffect(0.7)
-                    } else if !searchText.isEmpty {
-                        Button {
-                            searchText = ""
-                            completer.clear()
+                if let progress = routeFollower.progress, routeStarted {
+                    // Live nav header: maneuver banner → speed-camera
+                    // warning (only when approaching one) → Spotify
+                    // strip. When the camera warning appears it
+                    // pushes the strip down; when it clears the strip
+                    // moves back up. ContentView's overlay branch
+                    // skips this banner on the .map tab so it doesn't
+                    // double-render.
+                    VStack(spacing: 10) {
+                        ManeuverBanner(progress: progress) {
                             vm.clearRoute()
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 16))
-                                .foregroundStyle(SQ5Colors.textTertiary)
+                        }
+                        if let approach = cameraMonitor.nearestApproaching {
+                            SpeedCameraAlertBanner(approach: approach)
+                                .transition(.move(edge: .top)
+                                            .combined(with: .opacity))
+                        }
+                        MapNowPlayingStrip()
+                    }
+                    .padding(.horizontal, 26)
+                    .padding(.top, 4)
+                    .padding(.bottom, 6)
+                    .animation(.easeOut(duration: 0.3),
+                               value: cameraMonitor.nearestApproaching != nil)
+                } else if isSearchOpen {
+                    // Expanded destination search overlay. Icon size,
+                    // padding and corner radius all match the collapsed
+                    // button so the magnifying glass appears stationary
+                    // when the bar expands around it.
+                    HStack(spacing: 14) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 26, weight: .semibold))
+                            .foregroundStyle(SQ5Colors.textPrimary)
+
+                        TextField("Destination", text: $searchText)
+                            .font(SQ5Typography.subtitle)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                            .submitLabel(.search)
+                            .autocorrectionDisabled(true)
+                            .textInputAutocapitalization(.never)
+                            .focused($searchFocused)
+                            .onSubmit { runDirectSearch() }
+                            .onChange(of: searchText) { newValue in
+                                completer.update(query: newValue, near: controller.currentRegion)
+                            }
+
+                        if isSearching {
+                            ProgressView()
+                                .tint(SQ5Colors.textTertiary)
+                                .scaleEffect(0.7)
+                        } else {
+                            // Tap once when text is non-empty → clear field
+                            // (and any active route). Tap when empty → close
+                            // the search overlay entirely.
+                            Button {
+                                if searchText.isEmpty {
+                                    closeSearch()
+                                } else {
+                                    searchText = ""
+                                    completer.clear()
+                                    vm.clearRoute()
+                                }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 24))
+                                    .foregroundStyle(SQ5Colors.textTertiary)
+                            }
                         }
                     }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(SQ5Colors.surface.opacity(0.95))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(SQ5Colors.border, lineWidth: 1)
-                        )
-                )
-                .padding(.horizontal, 26)
-                .padding(.top, 4)
-                .padding(.bottom, 6)
-
-                if searchFocused && !completer.results.isEmpty {
-                    SuggestionList(
-                        results: completer.results,
-                        onSelect: { completion in
-                            searchText = completion.title
-                            searchFocused = false
-                            runSearch(for: completion)
-                        }
+                    // 21pt inset matches the collapsed button: 68pt
+                    // box minus 26pt icon, divided in half = 21pt to
+                    // each edge. Keeps the icon's centre at the same
+                    // (x, y) regardless of which state we're in.
+                    .padding(21)
+                    .background(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .fill(SQ5Colors.surface.opacity(0.94))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                    .stroke(SQ5Colors.border, lineWidth: 1)
+                            )
                     )
                     .padding(.horizontal, 26)
+                    .padding(.top, 4)
                     .padding(.bottom, 6)
-                }
-                else if searchFocused && searchText.isEmpty && !vm.recentDestinations.isEmpty {
-                    RecentDestinationsList(
-                        names: vm.recentDestinations,
-                        onSelect: { name in
-                            searchText = name
-                            searchFocused = false
-                            isSearching = true
-                            Task {
-                                await vm.search(query: name, near: controller.currentRegion)
-                                await MainActor.run { isSearching = false }
+
+                    if !completer.results.isEmpty {
+                        SuggestionList(
+                            results: completer.results,
+                            onSelect: { completion in
+                                searchText = completion.title
+                                runSearch(for: completion)
+                                closeSearch()
                             }
-                        },
-                        onClear: { vm.clearRecents() }
-                    )
+                        )
+                        .padding(.horizontal, 26)
+                        .padding(.bottom, 6)
+                    } else if searchText.isEmpty && !vm.recentDestinations.isEmpty {
+                        RecentDestinationsList(
+                            names: vm.recentDestinations,
+                            onSelect: { name in
+                                searchText = name
+                                // New destination — re-arm confirmation.
+                                routeStarted = false
+                                isSearching = true
+                                Task {
+                                    await vm.search(query: name, near: controller.currentRegion)
+                                    await MainActor.run { isSearching = false }
+                                }
+                                closeSearch()
+                            },
+                            onClear: { vm.clearRecents() }
+                        )
+                        .padding(.horizontal, 26)
+                        .padding(.bottom, 6)
+                    }
+                } else {
+                    // Collapsed: search button on the left, now-playing
+                    // strip directly to its right. No card chrome on the
+                    // now-playing side — just the artwork, text, and
+                    // transport icons floating on the map.
+                    HStack(spacing: 14) {
+                        Button {
+                            isSearchOpen = true
+                            // One tick of delay so the focus binding
+                            // applies after the TextField is mounted.
+                            DispatchQueue.main.async { searchFocused = true }
+                        } label: {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 26, weight: .semibold))
+                                .foregroundStyle(SQ5Colors.textPrimary)
+                                .frame(width: 68, height: 68)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                        .fill(SQ5Colors.surface.opacity(0.94))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                                .stroke(SQ5Colors.border, lineWidth: 1)
+                                        )
+                                )
+                        }
+                        .buttonStyle(.plain)
+
+                        MapNowPlayingStrip()
+
+                        // Pins the search button to the leading edge
+                        // when MapNowPlayingStrip collapses to nothing
+                        // (Spotify disconnected / no track). With the
+                        // strip visible its own `.frame(maxWidth: .infinity)`
+                        // text claims this space, so the Spacer adds no
+                        // gap in that state.
+                        Spacer(minLength: 0)
+                    }
                     .padding(.horizontal, 26)
+                    .padding(.top, 4)
                     .padding(.bottom, 6)
                 }
 
                 Spacer()
 
-                if let info = vm.routeInfo {
-                    NavigationCard(
+                if let info = vm.routeInfo, !routeStarted {
+                    // Pre-start review card. Shows destination summary
+                    // + Start/X buttons. Disappears once the user
+                    // accepts; the maneuver banner at the top then
+                    // takes over for the live drive.
+                    RouteConfirmationCard(
                         info: info,
-                        nextStep: vm.nextStep,
-                        onClear: {
+                        onStart: { routeStarted = true },
+                        onCancel: {
                             searchText = ""
                             vm.clearRoute()
                         }
@@ -170,7 +304,8 @@ struct MapTabView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
-            .animation(.easeInOut(duration: 0.2), value: vm.routeInfo != nil)
+            .animation(.easeInOut(duration: 0.2),
+                       value: (vm.routeInfo != nil) && !routeStarted)
         }
         .onAppear {
             location.requestPermission()
@@ -187,6 +322,31 @@ struct MapTabView: View {
             // location tick.
             guard let loc else { return }
             controller.applyLocationUpdate(loc)
+            // Feed the route follower so live step tracking, ETA,
+            // and lateral-deviation values stay current.
+            routeFollower.applyLocation(loc)
+        }
+        .onReceive(vm.$route) { route in
+            // Hand the freshly-calculated MKRoute (or nil on clear) to
+            // the follower so it can pre-compute per-step cumulative
+            // distances and reset its step index.
+            routeFollower.setRoute(route)
+            // Clearing the route always re-arms the confirmation flow.
+            // Re-routes (route ≠ nil while we were already started)
+            // preserve `routeStarted` so the driver isn't asked to
+            // re-confirm mid-drive.
+            if route == nil { routeStarted = false }
+        }
+        .onReceive(routeFollower.$progress) { progress in
+            // Drive the voice prompts off each follower update. The
+            // service handles its own per-step dedup so this fires
+            // ~1/sec without any throttling here.
+            navVoice.update(with: progress)
+
+            // Off-route detection. Two thresholds: distance (>40 m
+            // lateral) AND duration (>5 s sustained). A brief GPS
+            // jitter doesn't trigger; a real missed turn does.
+            handleDeviation(progress)
         }
         .onReceive(vm.$routePolyline.compactMap { $0 }) { polyline in
             // Fit the camera to the calculated route, then re-engage follow
@@ -196,14 +356,36 @@ struct MapTabView: View {
                                       dy: -rect.size.height * 0.1)
             controller.fitRegion(MKCoordinateRegion(padded))
         }
+        .onReceive(vm.$routePolyline) { polyline in
+            // Hand the polyline (or nil on clear) to the road-limits
+            // service so it prefetches Digiroad segments along the
+            // corridor — without this, the speed-camera same-road gate
+            // can only resolve cameras inside the ~2 km around-user
+            // bbox, and a camera 800 m up the route fails the gate.
+            roadLimits.setRoute(polyline.map { Self.coords(from: $0) })
+        }
         .onChange(of: vm.routeInfo != nil) { hasRoute in
             if hasRoute { controller.setFollow(true) }
         }
     }
 
+    /// Extract the polyline's vertices as plain coords — keeps
+    /// `RoadSpeedLimitService` free of a MapKit dependency.
+    private static func coords(from polyline: MKPolyline) -> [CLLocationCoordinate2D] {
+        let n = polyline.pointCount
+        guard n > 0 else { return [] }
+        var out = [CLLocationCoordinate2D](repeating: CLLocationCoordinate2D(),
+                                           count: n)
+        polyline.getCoordinates(&out, range: NSRange(location: 0, length: n))
+        return out
+    }
+
     private func runDirectSearch() {
         guard !searchText.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        searchFocused = false
+        closeSearch()
+        // New destination — require the user to confirm "Start" once
+        // the route comes back.
+        routeStarted = false
         isSearching = true
         Task {
             await vm.search(query: searchText, near: controller.currentRegion)
@@ -211,7 +393,62 @@ struct MapTabView: View {
         }
     }
 
+    /// Collapse the search overlay back to the compact button. Used
+    /// by every dismissal path — submit, suggestion pick, recent
+    /// pick, and the X-when-empty tap.
+    private func closeSearch() {
+        searchFocused = false
+        isSearchOpen = false
+        completer.clear()
+    }
+
+    /// Watchdog that decides whether the user has actually missed a
+    /// turn (vs a brief lateral GPS wobble). Two gates:
+    ///   • `progress.lateralDeviationMeters > offRouteThresholdMeters`
+    ///   • Sustained for `offRouteHoldSeconds` continuously
+    /// On trip, calls `vm.reroute(from:)` and resets the watchdog.
+    /// Debounced by `isRerouting` so we don't kick a second reroute
+    /// before the first one's async task lands.
+    private func handleDeviation(_ progress: RouteFollower.Progress?) {
+        // No route or no progress → nothing to detect.
+        guard let progress, vm.route != nil, !isRerouting else {
+            offRouteSince = nil
+            return
+        }
+
+        // Back on the route → reset the watchdog timer.
+        guard progress.lateralDeviationMeters > offRouteThresholdMeters else {
+            offRouteSince = nil
+            return
+        }
+
+        // First sample over the threshold: arm the timer.
+        if offRouteSince == nil {
+            offRouteSince = Date()
+            return
+        }
+
+        // Still over the threshold; check whether we've been over for
+        // long enough to fire a reroute.
+        guard let since = offRouteSince,
+              Date().timeIntervalSince(since) >= offRouteHoldSeconds,
+              let here = location.location?.coordinate
+        else { return }
+
+        offRouteSince = nil
+        isRerouting = true
+        // Brief audio cue so the driver knows the map is recalculating
+        // instead of going silent.
+        navVoice.announceReroute()
+        Task {
+            await vm.reroute(from: here)
+            await MainActor.run { isRerouting = false }
+        }
+    }
+
     private func runSearch(for completion: MKLocalSearchCompletion) {
+        // New destination from a suggestion tap — re-arm confirmation.
+        routeStarted = false
         isSearching = true
         Task {
             await vm.search(completion: completion, near: controller.currentRegion)
@@ -275,12 +512,13 @@ final class MapController: ObservableObject {
     /// mid-animation value the moment a tilt button is tapped.
     private var desiredPitch: CGFloat = 50
 
-    private static let followKey  = "audipad.map.followUser"
-    private static let headingKey = "audipad.map.headingUp"
-    private static let altKey     = "audipad.map.altitude"
-    private static let latKey     = "audipad.map.centerLat"
-    private static let lonKey     = "audipad.map.centerLon"
-    private static let pitchKey   = "audipad.map.pitch"
+    private static let followKey      = "audipad.map.followUser"
+    private static let headingKey     = "audipad.map.headingUp"
+    private static let headingValKey  = "audipad.map.headingDeg"
+    private static let altKey         = "audipad.map.altitude"
+    private static let latKey         = "audipad.map.centerLat"
+    private static let lonKey         = "audipad.map.centerLon"
+    private static let pitchKey       = "audipad.map.pitch"
 
     init() {
         let d = UserDefaults.standard
@@ -290,6 +528,11 @@ final class MapController: ObservableObject {
         self.desiredAltitude = saved > 0 ? saved : 2500
         let savedPitch = d.double(forKey: Self.pitchKey)
         self.desiredPitch = (savedPitch > 0 || d.object(forKey: Self.pitchKey) != nil) ? CGFloat(savedPitch) : 50
+        // Restore the last camera heading so visiting another tab and
+        // returning doesn't reset the map to north-up — important
+        // when parked + heading-up, where there's no valid course to
+        // re-derive the rotation from.
+        self.currentMapHeading = d.double(forKey: Self.headingValKey)
     }
 
     // MARK: Saved camera (zoom + center) — restored on launch.
@@ -314,6 +557,7 @@ final class MapController: ObservableObject {
         d.set(Double(desiredPitch), forKey: Self.pitchKey)
         d.set(map.camera.centerCoordinate.latitude,  forKey: Self.latKey)
         d.set(map.camera.centerCoordinate.longitude, forKey: Self.lonKey)
+        d.set(map.camera.heading, forKey: Self.headingValKey)
     }
 
     /// Called by the pinch-end gesture handler so user-driven zooms get
@@ -684,6 +928,508 @@ private struct Triangle: Shape {
 /// Compact "you are here" panel — current road name + ref + speed limit.
 /// Renders nothing when all three are nil so it stays out of the driver's
 /// way before the first fetch lands.
+// MARK: - Maneuver banner (active turn-by-turn)
+
+/// Large banner shown in the search-row slot while a route is active.
+/// Reads `RouteFollower.Progress` and renders:
+///   • a maneuver icon derived from the instruction text (MKRoute.Step
+///     doesn't expose a structured maneuver type — Apple gives us only
+///     instruction strings, so we keyword-match against EN and FI)
+///   • distance to the next maneuver (rounded to 10 m below 1 km)
+///   • the instruction text itself
+///   • ETA and total distance remaining
+///   • a stop-nav button
+private struct ManeuverBanner: View {
+    let progress: RouteFollower.Progress
+    let onStop: () -> Void
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Image(systemName: maneuverIcon)
+                .font(.system(size: 36, weight: .semibold))
+                .foregroundStyle(SQ5Colors.accent)
+                .frame(width: 56, height: 56)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(Self.formatDistance(progress.distanceToManeuverMeters))
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .foregroundStyle(SQ5Colors.textPrimary)
+                    .monospacedDigit()
+                Text(progress.currentInstruction)
+                    .font(SQ5Typography.subtitle)
+                    .foregroundStyle(SQ5Colors.textPrimary)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(alignment: .trailing, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(Self.formatEta(progress.etaSeconds))
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(SQ5Colors.textPrimary)
+                        .monospacedDigit()
+                    Text("·")
+                        .foregroundStyle(SQ5Colors.textTertiary)
+                    // Wall-clock arrival time next to remaining minutes
+                    // — answers "what time will I get there?" without
+                    // a mental add-minutes-to-now step.
+                    Text(Self.formatArrivalTime(progress.etaSeconds))
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(SQ5Colors.textSecondary)
+                        .monospacedDigit()
+                }
+                Text(Self.formatDistance(progress.distanceRemainingMeters))
+                    .font(SQ5Typography.caption)
+                    .foregroundStyle(SQ5Colors.textSecondary)
+                    .monospacedDigit()
+            }
+
+            Button(action: onStop) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 28))
+                    .foregroundStyle(SQ5Colors.textTertiary)
+            }
+            .buttonStyle(.plain)
+        }
+        // Normal card-content inset (banner has chrome; Spotify
+        // strip below has none, so the chrome-less row naturally
+        // extends to the card edges).
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(SQ5Colors.surface.opacity(0.94))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(SQ5Colors.border, lineWidth: 1)
+                )
+        )
+        .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 2)
+    }
+
+    /// SF Symbol for the current maneuver. MKRoute hands us instruction
+    /// text, not a maneuver enum, so we keyword-match. EN + FI coverage
+    /// because Apple localises the strings to the user's region.
+    private var maneuverIcon: String {
+        let text = progress.currentInstruction.lowercased()
+        if text.contains("u-turn") || text.contains("käännös takaisin") {
+            return "arrow.uturn.up"
+        }
+        if text.contains("roundabout") || text.contains("liikenneympyrä") {
+            return "arrow.triangle.turn.up.right.diamond"
+        }
+        if text.contains("arrive") || text.contains("destination") || text.contains("saavu") {
+            return "mappin.and.ellipse"
+        }
+        if text.contains("right") || text.contains("oikealle") || text.contains("oikealla") {
+            return "arrow.turn.up.right"
+        }
+        if text.contains("left") || text.contains("vasemmalle") || text.contains("vasemmalla") {
+            return "arrow.turn.up.left"
+        }
+        if text.contains("exit") || text.contains("poistu") || text.contains("ramppi") {
+            return "arrow.up.right"
+        }
+        if text.contains("merge") || text.contains("yhty") {
+            return "arrow.triangle.merge"
+        }
+        return "arrow.up"
+    }
+
+    /// "120 m" below 1 km (rounded to nearest 10 m so the readout
+    /// doesn't jitter), "1.2 km" above.
+    static func formatDistance(_ m: Double) -> String {
+        if m < 1000 {
+            return "\(Int((m / 10).rounded()) * 10) m"
+        }
+        return String(format: "%.1f km", m / 1000)
+    }
+
+    /// "5 min" / "1 h 20 min" — relative ETA, hours-and-minutes for
+    /// long routes.
+    static func formatEta(_ seconds: Double) -> String {
+        let mins = max(0, Int((seconds / 60).rounded()))
+        if mins >= 60 {
+            return "\(mins / 60) h \(mins % 60) min"
+        }
+        return "\(mins) min"
+    }
+
+    /// Wall-clock arrival time, locale-aware (`HH:mm` in 24-hour
+    /// regions like Finland, `h:mm a` in 12-hour ones).
+    static func formatArrivalTime(_ etaSeconds: Double) -> String {
+        let arrival = Date().addingTimeInterval(etaSeconds)
+        let f = DateFormatter()
+        f.timeStyle = .short
+        f.dateStyle = .none
+        return f.string(from: arrival)
+    }
+}
+
+// MARK: - Now-playing strip (top of the map, no chrome)
+
+/// Track artwork + title + transport buttons rendered as bare elements
+/// (no card background) so they read as part of the map header rather
+/// than another floating panel. Text gets a soft drop shadow so it
+/// stays legible over varying map content. Album art sized to match
+/// the 68pt search button to its left.
+private struct MapNowPlayingStrip: View {
+    @EnvironmentObject private var spotify: SpotifyService
+
+    var body: some View {
+        // Hide entirely when there's nothing meaningful to show. The
+        // strip floats on the map without chrome, so an empty-state
+        // placeholder reads as visual noise — better to let the map
+        // breathe and surface the strip only when Spotify is actively
+        // connected with a track loaded.
+        if spotify.isConnected, let np = spotify.nowPlaying {
+            HStack(spacing: 14) {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(SQ5Colors.surfaceElevated)
+                    .frame(width: 68, height: 68)
+                    .overlay {
+                        if let art = np.artwork {
+                            Image(uiImage: art)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 68, height: 68)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        } else {
+                            Image(systemName: "music.note")
+                                .font(.system(size: 26, weight: .light))
+                                .foregroundStyle(SQ5Colors.textTertiary)
+                        }
+                    }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(np.title)
+                        .font(SQ5Typography.subtitle)
+                        .foregroundStyle(SQ5Colors.textPrimary)
+                        .lineLimit(1)
+                    Text(np.artist)
+                        .font(SQ5Typography.caption)
+                        .foregroundStyle(SQ5Colors.textPrimary.opacity(0.75))
+                        .lineLimit(1)
+                }
+                // Shadow keeps the white text readable over light
+                // areas of the map (snow, parks, light building
+                // footprints).
+                .shadow(color: .black.opacity(0.6), radius: 3, x: 0, y: 1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: 8) {
+                    MapTransportButton(symbol: "backward.fill",
+                                       size: 22,
+                                       enabled: true) {
+                        spotify.previous()
+                    }
+                    MapTransportButton(symbol: np.isPaused ? "play.fill" : "pause.fill",
+                                       size: 28,
+                                       enabled: true) {
+                        spotify.togglePlayPause()
+                    }
+                    MapTransportButton(symbol: "forward.fill",
+                                       size: 22,
+                                       enabled: true) {
+                        spotify.next()
+                    }
+                }
+                .shadow(color: .black.opacity(0.5), radius: 3, x: 0, y: 1)
+            }
+            // Trailing-only inset to match the banner's internal
+            // horizontal padding on the right — aligns the "next"
+            // button with the banner X button above. Left stays at
+            // the row edge so the album art lines up with the banner
+            // card's left edge.
+            .padding(.trailing, 18)
+        }
+    }
+}
+
+private struct MapTransportButton: View {
+    let symbol: String
+    let size: CGFloat
+    let enabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: size, weight: .semibold))
+                .foregroundStyle(enabled ? SQ5Colors.textPrimary : SQ5Colors.textTertiary)
+                .frame(width: size + 14, height: size + 14)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+}
+
+// MARK: - Stylised speedometer (above the road info panel)
+
+/// Compact dial speedometer for the map's bottom-left. Reuses the
+/// global `SpeedSource` preference (GPS vs OBD-sim) so it matches the
+/// `TopBar` pill on other tabs. Arc colour flips to red when the
+/// current speed exceeds the active road's limit — combined with the
+/// `TrafficSignView` in `RoadInfoPanel` below it, the driver gets a
+/// fast "am I OK?" glance without parsing numbers.
+private struct SpeedometerCard: View {
+    let limitKph: Int?
+
+    @EnvironmentObject private var location: LocationService
+    @EnvironmentObject private var vehicle: VehicleViewModel
+    @AppStorage(SpeedSource.defaultsKey) private var speedSourceRaw: String = SpeedSource.gps.rawValue
+
+    /// Top of the dial scale — the SQ5's actual top speed. Real
+    /// speedometer headroom; the V6 has to be able to peg the gauge.
+    private static let maxKph: Double = 250
+    /// Fraction of a full circle covered by the arc — 270° leaves a
+    /// gap at the bottom so the centre number sits in a natural well.
+    private static let arcFraction: Double = 0.75
+
+    private var currentSpeedKph: Double {
+        switch SpeedSource(rawValue: speedSourceRaw) ?? .gps {
+        case .gps:
+            guard let s = location.location?.speed, s >= 0 else { return 0 }
+            return s * 3.6
+        case .obd:
+            return vehicle.snapshot.speedKph
+        }
+    }
+
+    private var clampedSpeed: Double {
+        max(0, min(currentSpeedKph, Self.maxKph))
+    }
+
+    private var progress: Double {
+        clampedSpeed / Self.maxKph
+    }
+
+    private var isOverLimit: Bool {
+        guard let limit = limitKph else { return false }
+        return currentSpeedKph > Double(limit)
+    }
+
+    /// Position on the arc where the speed-limit marker should sit.
+    private var limitProgress: Double? {
+        guard let limit = limitKph, limit > 0 else { return nil }
+        return min(Double(limit) / Self.maxKph, 1.0)
+    }
+
+    /// How far the *accent-coloured* portion of the fill should extend
+    /// — capped at the limit when we're over it, so the red overshoot
+    /// segment owns everything past the limit position.
+    private var underLimitProgress: Double {
+        guard let lp = limitProgress else { return progress }
+        return min(progress, lp)
+    }
+
+    var body: some View {
+        ZStack {
+            // Track arc (the empty gauge).
+            Circle()
+                .trim(from: 0, to: Self.arcFraction)
+                .stroke(SQ5Colors.border.opacity(0.45),
+                        style: StrokeStyle(lineWidth: 8, lineCap: .butt))
+                .rotationEffect(.degrees(135))
+
+            // Filled arc — under-limit portion in white, matching the
+            // centre numerals. Stops at the speed limit (or at the
+            // current speed when we're below the limit / no limit set).
+            Circle()
+                .trim(from: 0, to: Self.arcFraction * underLimitProgress)
+                .stroke(SQ5Colors.textPrimary,
+                        style: StrokeStyle(lineWidth: 8, lineCap: .butt))
+                .rotationEffect(.degrees(135))
+                .animation(.easeOut(duration: 0.4), value: underLimitProgress)
+
+            // Over-limit "overshoot" segment in red — only the portion
+            // of the arc that's past the speed limit. Reads as "you're
+            // here, this much over". Easier on the eye than flashing
+            // the whole arc red against the dark card.
+            if let lp = limitProgress, progress > lp {
+                Circle()
+                    .trim(from: Self.arcFraction * lp,
+                          to: Self.arcFraction * progress)
+                    .stroke(Color.red,
+                            style: StrokeStyle(lineWidth: 8, lineCap: .butt))
+                    .rotationEffect(.degrees(135))
+                    .animation(.easeOut(duration: 0.4), value: progress)
+            }
+
+            // Speed-limit marker — a short radial tick that crosses
+            // the arc, accent-coloured so it pops against the muted
+            // track. Wrapping ZStack lets the rotation pivot around
+            // the gauge centre rather than the marker's own midpoint.
+            if let lp = limitProgress {
+                ZStack {
+                    Capsule()
+                        .fill(SQ5Colors.accent)
+                        .frame(width: 4, height: 18)
+                        .offset(y: -56)
+                }
+                .frame(width: 120, height: 120)
+                .rotationEffect(.degrees(Self.angle(for: lp)))
+                .animation(.easeOut(duration: 0.2), value: lp)
+            }
+
+            // Centre readout.
+            VStack(spacing: -2) {
+                Text("\(Int(currentSpeedKph.rounded()))")
+                    .font(.system(size: 34, weight: .semibold, design: .rounded))
+                    .foregroundStyle(SQ5Colors.textPrimary)
+                    .monospacedDigit()
+                Text("km/h")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(1.5)
+                    .foregroundStyle(SQ5Colors.textTertiary)
+            }
+        }
+        .frame(width: 120, height: 120)
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(SQ5Colors.surface.opacity(0.85))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(SQ5Colors.border, lineWidth: 1)
+                )
+        )
+        .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 2)
+    }
+
+    /// Angle (in degrees) at the given arc-progress fraction, measured
+    /// such that 0° points up. `progress = 0` is the start of the
+    /// gauge (bottom-left), `progress = 1` is the end (bottom-right).
+    /// The 270° arc starts at -135° (bottom-left of top) and ends at
+    /// +135°, sweeping clockwise.
+    private static func angle(for progress: Double) -> Double {
+        -135 + progress * 270
+    }
+}
+
+// MARK: - Boost gauge (next to the speedometer)
+
+/// Vertical bar gauge with an arrow indicator pointing to the current
+/// turbo-boost pressure. Same card chrome as the speedometer so they
+/// read as a pair. Displays the *absolute* pressure reading (idle ≈
+/// 1.0 bar, redline 2.0, WOT ≈ 1.95) — matching the SQ5Gauge on Home
+/// so the two surfaces agree.
+private struct BoostGaugeCard: View {
+    @EnvironmentObject private var vehicle: VehicleViewModel
+
+    /// Min / max of the bar's scale. Mirrors Home's `SQ5Gauge` range
+    /// (0–2.5 bar absolute) so the two gauges read identically when
+    /// looking at the same OBD snapshot.
+    private static let minBoostBar: Double = 0
+    private static let maxBoostBar: Double = 2.5
+    private static let redlineBar: Double = 2.0
+    private static let barHeight: CGFloat = 96
+
+    private var currentBoost: Double {
+        vehicle.snapshot.boostBar
+    }
+
+    private var progress: Double {
+        let span = Self.maxBoostBar - Self.minBoostBar
+        return min(max(0, (currentBoost - Self.minBoostBar) / span), 1.0)
+    }
+
+    /// Bar fraction at which the redline starts — same proportional
+    /// position as the redline tick on Home's `SQ5Gauge`.
+    private var redlineProgress: Double {
+        let span = Self.maxBoostBar - Self.minBoostBar
+        return (Self.redlineBar - Self.minBoostBar) / span
+    }
+
+    private var underRedlineProgress: Double {
+        min(progress, redlineProgress)
+    }
+
+    private var overRedlineProgress: Double {
+        max(0, progress - redlineProgress)
+    }
+
+    private var isOverRedline: Bool {
+        currentBoost > Self.redlineBar
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(alignment: .top, spacing: 6) {
+                // Vertical bar — muted track with white fill rising from
+                // the bottom as boost climbs.
+                ZStack(alignment: .bottom) {
+                    // Empty track.
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(SQ5Colors.border.opacity(0.45))
+                        .frame(width: 12, height: Self.barHeight)
+
+                    // White fill from 0 up to the redline (or current,
+                    // whichever is lower) — same colour as the
+                    // speedometer's under-limit segment.
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(SQ5Colors.textPrimary)
+                        .frame(width: 12,
+                               height: Self.barHeight * underRedlineProgress)
+                        .animation(.easeOut(duration: 0.3),
+                                   value: underRedlineProgress)
+
+                    // Red overshoot stacked on top of the white fill —
+                    // visualises only the portion of boost that's past
+                    // the 2.0 bar redline, matching how the speedometer
+                    // colours its over-limit overshoot.
+                    if overRedlineProgress > 0 {
+                        Rectangle()
+                            .fill(Color.red)
+                            .frame(width: 12,
+                                   height: Self.barHeight * overRedlineProgress)
+                            .offset(y: -Self.barHeight * redlineProgress)
+                            .animation(.easeOut(duration: 0.3),
+                                       value: overRedlineProgress)
+                    }
+                }
+
+                // Arrow indicator beside the bar, tracking the top of the
+                // fill. Accent-coloured so it pops against the white bar.
+                // We reserve `barHeight` worth of vertical space and slide
+                // the glyph within it via offset.
+                ZStack(alignment: .top) {
+                    Color.clear
+                        .frame(width: 16, height: Self.barHeight)
+                    Image(systemName: "arrowtriangle.left.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(SQ5Colors.accent)
+                        .offset(y: Self.barHeight * (1 - progress) - 7)
+                        .animation(.easeOut(duration: 0.3), value: progress)
+                }
+            }
+
+            VStack(spacing: -2) {
+                Text(String(format: "%.1f", currentBoost))
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+                    .foregroundStyle(SQ5Colors.textPrimary)
+                    .monospacedDigit()
+                Text("BAR")
+                    .font(.system(size: 9, weight: .semibold))
+                    .tracking(1.5)
+                    .foregroundStyle(SQ5Colors.textTertiary)
+            }
+        }
+        .frame(width: 60, height: 120)
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(SQ5Colors.surface.opacity(0.85))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(SQ5Colors.border, lineWidth: 1)
+                )
+        )
+        .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 2)
+    }
+}
+
 private struct RoadInfoPanel: View {
     let road: RoadSpeedLimitService.RoadInfo?
     let limit: Int?
@@ -948,6 +1694,81 @@ private struct RecentDestinationsList: View {
     }
 }
 
+// MARK: - Route confirmation card ("Start" gate before nav begins)
+
+/// Shown at the bottom of the map after a route is calculated but
+/// before the user has committed to navigating. Replaces the old
+/// always-on `NavigationCard`. Pattern is "review summary, then
+/// Start" so the maneuver banner doesn't pop in unsolicited.
+private struct RouteConfirmationCard: View {
+    let info: MapViewModel.RouteInfo
+    let onStart: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 18) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("DESTINATION")
+                    .font(SQ5Typography.caption)
+                    .tracking(1.5)
+                    .foregroundStyle(SQ5Colors.textTertiary)
+                Text(info.title)
+                    .font(SQ5Typography.subtitle)
+                    .foregroundStyle(SQ5Colors.textPrimary)
+                    .lineLimit(1)
+                HStack(spacing: 10) {
+                    Text(info.distance)
+                        .font(SQ5Typography.body)
+                        .foregroundStyle(SQ5Colors.textSecondary)
+                        .monospacedDigit()
+                    Text("·")
+                        .foregroundStyle(SQ5Colors.textTertiary)
+                    Text(info.duration)
+                        .font(SQ5Typography.body)
+                        .foregroundStyle(SQ5Colors.textSecondary)
+                        .monospacedDigit()
+                }
+            }
+
+            Spacer(minLength: 12)
+
+            Button(action: onCancel) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(SQ5Colors.textPrimary)
+                    .frame(width: 48, height: 48)
+                    .background(Circle().fill(SQ5Colors.surfaceElevated))
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onStart) {
+                HStack(spacing: 10) {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                    Text("Start")
+                        .font(SQ5Typography.subtitle)
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 28)
+                .padding(.vertical, 14)
+                .background(Capsule().fill(SQ5Colors.accent))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(SQ5Colors.surface.opacity(0.85))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(SQ5Colors.border, lineWidth: 1)
+                )
+        )
+        .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 2)
+    }
+}
+
 // MARK: - Navigation card (when route is active)
 
 private struct NavigationCard: View {
@@ -1008,14 +1829,19 @@ private struct NavigationCard: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
+        // Match the road-info / speedometer / boost cards: surface
+        // fill at 0.85 opacity, 16pt corner radius, soft drop shadow.
+        // Previously this used `background.opacity(0.96)` which read
+        // as a different colour family from the rest of the cluster.
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(SQ5Colors.background.opacity(0.96))
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(SQ5Colors.surface.opacity(0.85))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .stroke(SQ5Colors.border, lineWidth: 1)
                 )
         )
+        .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 2)
     }
 }
 
@@ -1067,9 +1893,19 @@ final class MapViewModel: ObservableObject {
     }
 
     @Published var routePolyline: MKPolyline? = nil
+    /// The full route returned by `MKDirections`. Held in addition to
+    /// `routePolyline` so `RouteFollower` has access to per-step
+    /// instructions, distances, and `expectedTravelTime` for the
+    /// live turn-by-turn tracker.
+    @Published var route: MKRoute? = nil
     @Published var routeInfo: RouteInfo? = nil
     @Published var nextStep: String? = nil
     @Published var recentDestinations: [String] = []
+    /// The destination `MKMapItem` from the last successful search.
+    /// Stored so we can recompute the route from a new origin (e.g.
+    /// after the user drifts off-route and we need to reroute) without
+    /// re-running the search step.
+    @Published private(set) var destination: MKMapItem? = nil
 
     private let recentsKey = "audipad.map.recentDestinations.v1"
     private let recentsLimit = 8
@@ -1100,6 +1936,10 @@ final class MapViewModel: ObservableObject {
     }
 
     private func calculateRoute(to destination: MKMapItem, from source: CLLocationCoordinate2D) async {
+        // Remember the destination so we can re-route from a fresh
+        // origin later (e.g. after drift) without re-doing search.
+        self.destination = destination
+
         let req = MKDirections.Request()
         req.source = MKMapItem(placemark: MKPlacemark(coordinate: source))
         req.destination = destination
@@ -1109,6 +1949,7 @@ final class MapViewModel: ObservableObject {
             let response = try await MKDirections(request: req).calculate()
             guard let route = response.routes.first else { return }
             self.routePolyline = route.polyline
+            self.route = route
             self.nextStep = route.steps.first(where: { !$0.instructions.isEmpty })?.instructions
             let title = destination.name ?? "Destination"
             self.routeInfo = RouteInfo(
@@ -1120,10 +1961,21 @@ final class MapViewModel: ObservableObject {
         } catch {}
     }
 
+    /// Recompute the route to the previously-chosen destination from
+    /// a fresh origin. Used by the off-route detector to silently
+    /// swap in a corrected polyline + step plan when the driver
+    /// misses a turn.
+    func reroute(from origin: CLLocationCoordinate2D) async {
+        guard let destination else { return }
+        await calculateRoute(to: destination, from: origin)
+    }
+
     func clearRoute() {
         routePolyline = nil
+        route = nil
         routeInfo = nil
         nextStep = nil
+        destination = nil
     }
 
     // MARK: Recents
@@ -1207,7 +2059,7 @@ private struct MapBackground: UIViewRepresentable {
             lookingAtCenter: controller.savedCenter,
             fromDistance: controller.savedAltitude,
             pitch: controller.savedPitch,
-            heading: 0
+            heading: controller.currentMapHeading
         )
         map.setCamera(cam, animated: false)
 
@@ -1408,7 +2260,9 @@ final class CarPositionAnnotation: NSObject, MKAnnotation {
 
 private final class CarAnnotationView: MKAnnotationView {
     private let scnView = SCNView()
-    private let carNode = CarModel.makeNode()
+    // Try the real SQ5 USDZ first; fall back to the procedural model
+    // if the asset is missing or fails to load.
+    private let carNode: SCNNode = CarModel.loadSQ5USDZ() ?? CarModel.makeNode()
     private let cameraNode = SCNNode()
     /// Camera-rig distance from the car. With orthographic projection the
     /// distance doesn't affect size — only the angle of view.
@@ -1493,7 +2347,13 @@ private final class CarAnnotationView: MKAnnotationView {
     ///     parallax that a static PNG can't fake.
     func applyTransform(carHeading: Double, mapHeading: Double, mapPitch: Double) {
         let yaw = Float((carHeading - mapHeading) * .pi / 180)
-        carNode.eulerAngles = SCNVector3(0, -yaw, 0)
+        // The car model is built with its hood pointing +Z. With the
+        // pitch-zero camera (orbit point above, looking -Y) the screen's
+        // "up" axis maps to world -Z, so +Z faces screen-down. Without
+        // the extra π flip a car heading north would render as reversing
+        // away from us — add the half-turn to align the hood with the
+        // geographic direction of travel.
+        carNode.eulerAngles = SCNVector3(0, -yaw + .pi, 0)
 
         let p = Float(mapPitch * .pi / 180)
         // Camera sits on a Y-Z circle around the car, looking at the origin.

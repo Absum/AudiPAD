@@ -48,10 +48,15 @@ final class RoadSpeedLimitService: ObservableObject {
     private static let vmsRadiusM: CLLocationDistance = 500
     private static let cacheMaxAgeSec: TimeInterval = 24 * 3600
     private static let vmsRefreshIntervalSec: TimeInterval = 60
-    /// Half-side of the Digiroad bbox in degrees. ~500 m at 60° N
-    /// (1° lat ≈ 111 km; 1° lon ≈ 55 km at this latitude).
-    private static let digiroadBBoxHalfLatDeg = 0.0045
-    private static let digiroadBBoxHalfLonDeg = 0.0090
+    /// Half-side of the Digiroad bbox in degrees. ~2 km at 60° N
+    /// (1° lat ≈ 111 km; 1° lon ≈ 55 km at this latitude). Sized to
+    /// comfortably exceed the speed-camera alert radius (1 km) so a
+    /// camera detected 800 m ahead is already inside the cached
+    /// segments when the same-road gate evaluates it — otherwise the
+    /// camera snap returns nil and the banner only fires once we're
+    /// metres from the pole.
+    private static let digiroadBBoxHalfLatDeg = 0.018
+    private static let digiroadBBoxHalfLonDeg = 0.036
 
     // MARK: Internal state
 
@@ -75,8 +80,33 @@ final class RoadSpeedLimitService: ObservableObject {
 
     /// Raw Digiroad segments kept around so we can answer "what road
     /// link is this coordinate on?" — used by the speed-camera same-
-    /// road gate. Replaced on every Digiroad fetch.
+    /// road gate. This is the *merged* view consumed by `linkID(...)`
+    /// and `snapped(...)`; the actual data lives in two sources:
+    /// `userAreaSegments` (a small bbox around the user, refreshed as
+    /// the user moves) and `routeSegments` (a thin corridor along the
+    /// active route polyline, populated by `setRoute`). Without the
+    /// corridor a camera 800 m up the route can fail the same-road
+    /// gate because no Digiroad segments near it are cached yet.
     private var digiroadSegments: [DigiroadCachedSegment] = []
+
+    /// Segments from the around-user fetch (`fetchDigiroad`). Drives
+    /// the live `Reading` for the user's current road, in addition to
+    /// being merged into `digiroadSegments`.
+    private var userAreaSegments: [DigiroadCachedSegment] = []
+
+    /// Segments along the currently-active route corridor, populated
+    /// once per `setRoute(_:)` and cleared on route change/nil.
+    private var routeSegments: [DigiroadCachedSegment] = []
+
+    /// Fingerprint of the current route (hash of every vertex). Used
+    /// by `fetchAlongRoute` to bail when the route changes mid-fetch,
+    /// and by `setRoute`'s dedup check.
+    private var currentRouteFingerprint: Int?
+
+    /// Handle for the in-flight corridor fetch. Held so a subsequent
+    /// `setRoute` can cancel an obsolete fetch immediately instead of
+    /// letting it run to completion and waste WFS bandwidth.
+    private var activeRouteTask: Task<Void, Never>?
 
     /// Cached list of all VMS speed-limit signs nationwide. Refreshed on
     /// the VMS cadence; nearest-sign lookup runs on every coord change.
@@ -268,7 +298,9 @@ final class RoadSpeedLimitService: ObservableObject {
             // Vayla expects lon,lat order when the CRS is EPSG:4326 in the bbox suffix;
             // the JSON output confirms it (coords are lon,lat,elev).
             URLQueryItem(name: "bbox", value: "\(minLon),\(minLat),\(maxLon),\(maxLat),EPSG:4326"),
-            URLQueryItem(name: "count", value: "200"),
+            // Bumped alongside the bbox growth so dense urban areas
+            // (central Helsinki) don't get a truncated payload.
+            URLQueryItem(name: "count", value: "800"),
             URLQueryItem(name: "outputFormat", value: "application/json"),
         ]
         guard let url = components.url else { return }
@@ -290,8 +322,10 @@ final class RoadSpeedLimitService: ObservableObject {
 
             // Cache every usable segment (geometry + link_id) so the
             // same-road snapper can resolve arbitrary coords later
-            // without a re-fetch.
-            digiroadSegments = payload.features.compactMap { feature -> DigiroadCachedSegment? in
+            // without a re-fetch. We write to the user-area source and
+            // then rebuild the merged `digiroadSegments` view (which
+            // also folds in any active-route corridor).
+            userAreaSegments = payload.features.compactMap { feature -> DigiroadCachedSegment? in
                 guard let linkId = feature.properties.linkId,
                       let coords = feature.geometry?.coordinates,
                       !coords.isEmpty
@@ -305,10 +339,17 @@ final class RoadSpeedLimitService: ObservableObject {
                                              limit: feature.properties.arvo,
                                              vertices: vertices)
             }
+            rebuildSegments()
 
             // Pick the segment whose nearest *edge* sits closest to the
             // user, course-aligned when course is valid. Segments with no
             // or out-of-range limit don't qualify (we want a usable limit).
+            // Read from the merged view rather than userAreaSegments
+            // alone: `bestEdgeMatch` already enforces 35 m proximity +
+            // course alignment, so far-away route-corridor segments are
+            // naturally excluded — and a transient empty user-area
+            // payload (over water, brief HTTP failure) can still
+            // produce a Reading from the route corridor.
             let candidates = digiroadSegments.filter { seg in
                 guard let limit = seg.limit else { return false }
                 return (10...130).contains(limit)
@@ -337,6 +378,234 @@ final class RoadSpeedLimitService: ObservableObject {
         } catch {
             lastError = "Digiroad network: \(error.localizedDescription)"
         }
+    }
+
+    // MARK: - Route corridor (camera-gate prefetch)
+
+    /// Bounding box helper for corridor tile geometry — kept private
+    /// so the rest of the codebase keeps dealing in coordinates.
+    private struct BBox {
+        let minLat: Double
+        let maxLat: Double
+        let minLon: Double
+        let maxLon: Double
+    }
+
+    /// Inform the service that a route is active (or nil to clear).
+    /// Triggers a corridor fetch (~200 m on each side, full polyline
+    /// length, tiled at ~5 km) so the speed-camera same-road gate can
+    /// resolve cameras anywhere along the route instead of only the
+    /// ~2 km around the user. Cheap to call on every publish — a
+    /// fingerprint check skips re-fetches for the same route.
+    func setRoute(_ coords: [CLLocationCoordinate2D]?) {
+        guard let coords, coords.count >= 2 else {
+            activeRouteTask?.cancel()
+            activeRouteTask = nil
+            currentRouteFingerprint = nil
+            if !routeSegments.isEmpty {
+                routeSegments = []
+                rebuildSegments()
+            }
+            return
+        }
+        let fp = Self.routeFingerprint(coords)
+        if currentRouteFingerprint == fp { return }
+        // Cancel any in-flight fetch for the previous route — its result
+        // is now obsolete and we'd rather free the bandwidth.
+        activeRouteTask?.cancel()
+        currentRouteFingerprint = fp
+        // Don't drop the existing corridor mid-replace — `fetchAlongRoute`
+        // will overwrite it atomically once the new fetch completes.
+        activeRouteTask = Task { [weak self] in
+            await self?.fetchAlongRoute(coords, fingerprint: fp)
+        }
+    }
+
+    private static func routeFingerprint(_ coords: [CLLocationCoordinate2D]) -> Int {
+        // Hash every vertex — not just count + endpoints. Two MKDirections
+        // routes between the same A and B can have identical lengths and
+        // endpoints but a different middle (alternate path, re-route after
+        // traffic). A coarser hash collides and silently skips the refetch.
+        var h = Hasher()
+        h.combine(coords.count)
+        for c in coords {
+            h.combine(c.latitude)
+            h.combine(c.longitude)
+        }
+        return h.finalize()
+    }
+
+    private func fetchAlongRoute(_ coords: [CLLocationCoordinate2D],
+                                 fingerprint: Int) async {
+        let tiles = Self.corridorTiles(for: coords,
+                                       maxTileSpanMeters: 5_000,
+                                       paddingMeters: 200)
+        do {
+            // Parallel tile fetches via TaskGroup. ~30 WFS round-trips
+            // is a long route; sequential awaits would let the user
+            // overtake the first cameras before the corridor is loaded.
+            // Any tile that errors propagates and aborts the rest — we
+            // refuse to commit a half-corridor that would then be
+            // locked in by the dedup check.
+            let collected = try await withThrowingTaskGroup(
+                of: [DigiroadCachedSegment].self
+            ) { group in
+                for tile in tiles {
+                    group.addTask { [self] in
+                        try Task.checkCancellation()
+                        return try await self.fetchDigiroadTile(bbox: tile)
+                    }
+                }
+                var acc: [DigiroadCachedSegment] = []
+                for try await segs in group {
+                    acc.append(contentsOf: segs)
+                }
+                return acc
+            }
+            // Commit + fingerprint-check on MainActor so a concurrent
+            // `setRoute(nil)` from the UI thread can't be clobbered
+            // between the guard and the write.
+            await MainActor.run {
+                guard currentRouteFingerprint == fingerprint else { return }
+                routeSegments = collected
+                rebuildSegments()
+            }
+        } catch is CancellationError {
+            // Cancelled by a newer `setRoute` — leave state alone, the
+            // replacement task is already running.
+            return
+        } catch {
+            // A tile fetch failed (network blip, HTTP non-2xx, decode
+            // error, …). Reset the fingerprint so a follow-up publish
+            // for the same route isn't silently short-circuited by the
+            // dedup check.
+            await MainActor.run {
+                if currentRouteFingerprint == fingerprint {
+                    currentRouteFingerprint = nil
+                }
+            }
+        }
+    }
+
+    /// Stateless WFS tile fetch — returns parsed segments without
+    /// touching any service state. Shared by `fetchAlongRoute` for each
+    /// corridor tile. Throws on any failure (network, non-2xx HTTP,
+    /// decode error) so the caller can choose to abort the whole
+    /// corridor rather than commit a partial one.
+    private func fetchDigiroadTile(bbox: BBox) async throws -> [DigiroadCachedSegment] {
+        guard var components = URLComponents(url: Self.digiroadEndpoint, resolvingAgainstBaseURL: false) else {
+            throw URLError(.badURL)
+        }
+        components.queryItems = [
+            URLQueryItem(name: "service", value: "WFS"),
+            URLQueryItem(name: "version", value: "2.0.0"),
+            URLQueryItem(name: "request", value: "GetFeature"),
+            URLQueryItem(name: "typeNames", value: "digiroad:dr_nopeusrajoitus"),
+            URLQueryItem(name: "srsName", value: "EPSG:4326"),
+            URLQueryItem(name: "bbox", value: "\(bbox.minLon),\(bbox.minLat),\(bbox.maxLon),\(bbox.maxLat),EPSG:4326"),
+            URLQueryItem(name: "count", value: "800"),
+            URLQueryItem(name: "outputFormat", value: "application/json"),
+        ]
+        guard let url = components.url else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: url)
+        request.setValue("AudiPad/0.1 (github.com/Absum/AudiPAD)", forHTTPHeaderField: "User-Agent")
+        request.setValue("gzip", forHTTPHeaderField: "Accept-Encoding")
+        request.timeoutInterval = 20
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw URLError(.badServerResponse)
+        }
+        let payload = try JSONDecoder().decode(DigiroadResponse.self, from: data)
+        return payload.features.compactMap { feature -> DigiroadCachedSegment? in
+            guard let linkId = feature.properties.linkId,
+                  let coords = feature.geometry?.coordinates,
+                  !coords.isEmpty
+            else { return nil }
+            let vertices: [CLLocationCoordinate2D] = coords.compactMap {
+                guard $0.count >= 2 else { return nil }
+                return CLLocationCoordinate2D(latitude: $0[1], longitude: $0[0])
+            }
+            guard !vertices.isEmpty else { return nil }
+            return DigiroadCachedSegment(linkId: linkId,
+                                         limit: feature.properties.arvo,
+                                         vertices: vertices)
+        }
+    }
+
+    /// Walk the polyline and chop it into bbox tiles, each no larger
+    /// than `maxTileSpanMeters` in either lat or lon dimension. Each
+    /// tile is padded by `paddingMeters` so a road that just clips the
+    /// route still falls inside the WFS bbox.
+    ///
+    /// Adjacent tiles overlap at one vertex so the corridor stays
+    /// continuous — without that, the road exactly at a tile seam
+    /// might be missing from both queries.
+    private static func corridorTiles(for coords: [CLLocationCoordinate2D],
+                                      maxTileSpanMeters: Double,
+                                      paddingMeters: Double) -> [BBox] {
+        guard let first = coords.first else { return [] }
+        let mPerLat = 111_320.0
+
+        var tiles: [BBox] = []
+        var minLat = first.latitude, maxLat = first.latitude
+        var minLon = first.longitude, maxLon = first.longitude
+
+        func emit() {
+            let centerLat = (minLat + maxLat) / 2
+            let mPerLon = 111_320.0 * cos(centerLat * .pi / 180)
+            let padLat = paddingMeters / mPerLat
+            let padLon = paddingMeters / max(mPerLon, 1)
+            tiles.append(BBox(minLat: minLat - padLat,
+                              maxLat: maxLat + padLat,
+                              minLon: minLon - padLon,
+                              maxLon: maxLon + padLon))
+        }
+
+        for i in 1..<coords.count {
+            let c = coords[i]
+            let prev = coords[i - 1]
+            let centerLat = (minLat + maxLat) / 2
+            let mPerLon = 111_320.0 * cos(centerLat * .pi / 180)
+
+            let candMinLat = min(minLat, c.latitude)
+            let candMaxLat = max(maxLat, c.latitude)
+            let candMinLon = min(minLon, c.longitude)
+            let candMaxLon = max(maxLon, c.longitude)
+            let spanLatM = (candMaxLat - candMinLat) * mPerLat
+            let spanLonM = (candMaxLon - candMinLon) * mPerLon
+
+            if spanLatM > maxTileSpanMeters || spanLonM > maxTileSpanMeters {
+                emit()
+                // Seed the next tile with the previous vertex so the
+                // segment between prev and c isn't dropped.
+                minLat = prev.latitude;  maxLat = prev.latitude
+                minLon = prev.longitude; maxLon = prev.longitude
+            }
+            minLat = min(minLat, c.latitude)
+            maxLat = max(maxLat, c.latitude)
+            minLon = min(minLon, c.longitude)
+            maxLon = max(maxLon, c.longitude)
+        }
+        emit()
+        return tiles
+    }
+
+    /// Recompose the merged `digiroadSegments` view from its two
+    /// sources (around-user + route corridor), deduping by link_id so
+    /// a road that appears in both sources is stored once.
+    private func rebuildSegments() {
+        var seen = Set<String>()
+        var merged: [DigiroadCachedSegment] = []
+        merged.reserveCapacity(userAreaSegments.count + routeSegments.count)
+        for seg in userAreaSegments {
+            if seen.insert(seg.linkId).inserted { merged.append(seg) }
+        }
+        for seg in routeSegments {
+            if seen.insert(seg.linkId).inserted { merged.append(seg) }
+        }
+        digiroadSegments = merged
     }
 
     // MARK: - Apple Maps reverse geocoding (road name)

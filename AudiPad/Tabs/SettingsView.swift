@@ -10,6 +10,8 @@ struct SettingsView: View {
 
     @AppStorage(AlertAudio.enabledDefaultsKey) private var audioAlertsEnabled = true
     @AppStorage(SpeedSource.defaultsKey) private var speedSourceRaw: String = SpeedSource.gps.rawValue
+    @AppStorage(NavigatorSettings.showSpeedometerKey) private var showSpeedometer: Bool = true
+    @AppStorage(NavigatorSettings.showBoostGaugeKey) private var showBoostGauge: Bool = true
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -21,6 +23,7 @@ struct SettingsView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 28) {
                         statusSection
+                        navigatorSection
                         configSection
                         Spacer(minLength: 40)
                     }
@@ -81,6 +84,59 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Navigator (Map-tab specific prefs)
+
+    private var navigatorSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(title: "Navigator")
+                .padding(.bottom, 12)
+
+            VStack(spacing: 0) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Show speedometer")
+                            .font(SQ5Typography.body)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                        Text("Stylised dial in the Map tab's bottom-left cluster")
+                            .font(SQ5Typography.caption)
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $showSpeedometer)
+                        .labelsHidden()
+                        .tint(SQ5Colors.accent)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                Divider().background(SQ5Colors.border)
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Show boost gauge")
+                            .font(SQ5Typography.body)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                        Text("Vertical turbo-boost gauge next to the speedometer")
+                            .font(SQ5Typography.caption)
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $showBoostGauge)
+                        .labelsHidden()
+                        .tint(SQ5Colors.accent)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(SQ5Colors.surface)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(SQ5Colors.border, lineWidth: 1)
+                    )
+            )
+        }
+    }
+
     // MARK: - Config (placeholder for now)
 
     private var configSection: some View {
@@ -124,7 +180,7 @@ struct SettingsView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 14)
                 Divider().background(SQ5Colors.border)
-                StatusRow(label: "App version", primary: "0.1.0 (1)", secondary: nil)
+                StatusRow(label: "App version", primary: Self.appVersionString, secondary: nil)
                 Divider().background(SQ5Colors.border)
                 StatusRow(label: "Display brightness", primary: "Auto", secondary: nil)
                 Divider().background(SQ5Colors.border)
@@ -213,6 +269,17 @@ struct SettingsView: View {
             return "fetch failed: \(err)"
         }
         return parts.joined(separator: " · ")
+    }
+
+    /// Reads CFBundleShortVersionString + CFBundleVersion from the
+    /// Info.plist so this row stays in sync with the values in
+    /// project.yml (xcodegen → Info.plist) without us having to edit
+    /// the string here on every bump.
+    static var appVersionString: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(short) (\(build))"
     }
 }
 

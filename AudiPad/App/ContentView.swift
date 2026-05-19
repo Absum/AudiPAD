@@ -37,17 +37,23 @@ struct ContentView: View {
             // touches from interactive content (toggles, search, etc.).
             // Camera alerts take priority; traffic incidents surface when
             // no camera alert is active.
+            //
+            // Map tab is handled separately — it positions the banner
+            // *inside* its own header stack so it slots between the
+            // maneuver banner and the Spotify strip while navigating.
             .overlay(alignment: placement.alignment) {
                 Group {
-                    if let approach = cameras.nearestApproaching {
-                        SpeedCameraAlertBanner(approach: approach)
-                            .transition(.move(edge: placement.transitionEdge)
-                                        .combined(with: .opacity))
-                    } else if let incident = trafficMonitor.severeNearby {
-                        TrafficAlertBanner(incident: incident,
-                                           distanceMeters: trafficMonitor.severeDistanceMeters)
-                            .transition(.move(edge: placement.transitionEdge)
-                                        .combined(with: .opacity))
+                    if selectedTab != .map {
+                        if let approach = cameras.nearestApproaching {
+                            SpeedCameraAlertBanner(approach: approach)
+                                .transition(.move(edge: placement.transitionEdge)
+                                            .combined(with: .opacity))
+                        } else if let incident = trafficMonitor.severeNearby {
+                            TrafficAlertBanner(incident: incident,
+                                               distanceMeters: trafficMonitor.severeDistanceMeters)
+                                .transition(.move(edge: placement.transitionEdge)
+                                            .combined(with: .opacity))
+                        }
                     }
                 }
                 .padding(.horizontal, 24)
@@ -63,6 +69,7 @@ struct ContentView: View {
         .environmentObject(locationService)
         .environmentObject(traffic)
         .environmentObject(cameraService)
+        .environmentObject(cameras)
         .environmentObject(roadLimits)
         .environmentObject(signHistory)
         .background(SQ5Colors.background.ignoresSafeArea())

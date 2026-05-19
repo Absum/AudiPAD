@@ -36,8 +36,16 @@ targets:
       path: AudiPad/Info.plist
       properties:
         CFBundleDisplayName: AudiPad
-        CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "0.2.0"
+        CFBundleVersion: "3"
+        # Declare Finnish + English as supported localizations so
+        # MKDirections / MKRoute return instruction text in Finnish on
+        # a Finnish-locale iPad (instead of falling back to English).
+        # Apple's localization machinery looks at Bundle.preferred-
+        # Localizations to pick the language for system text.
+        CFBundleLocalizations:
+          - en
+          - fi
         UIRequiresFullScreen: true
         UIStatusBarHidden: true
         UIViewControllerBasedStatusBarAppearance: false
@@ -72,6 +80,6 @@ targets:
         CODE_SIGN_STYLE: Automatic
         CODE_SIGNING_REQUIRED: YES
         CODE_SIGNING_ALLOWED: YES
-        CURRENT_PROJECT_VERSION: "1"
-        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "3"
+        MARKETING_VERSION: "0.2.0"
         ENABLE_PREVIEWS: YES

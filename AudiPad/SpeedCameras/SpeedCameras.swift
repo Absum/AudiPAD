@@ -107,7 +107,7 @@ final class SpeedCameraMonitor: ObservableObject {
     /// the "distance number flips between candidates" complaint.
     private var stickyCameraID: UUID?
 
-    init(alertRadiusMeters: CLLocationDistance = 1000,
+    init(alertRadiusMeters: CLLocationDistance = 800,
          minSpeedKph: Double = 5,
          approachHalfConeDeg: Double = 45,
          cameraFacingHalfConeDeg: Double = 60) {

@@ -89,8 +89,7 @@ final class AlertAudio: NSObject, ObservableObject {
 
     private func speak(line: String) {
         let utterance = AVSpeechUtterance(string: line)
-        utterance.voice = AVSpeechSynthesisVoice(language: "fi-FI")
-            ?? AVSpeechSynthesisVoice(language: "en-US")
+        utterance.voice = VoiceConfig.shared
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
         utterance.pitchMultiplier = 1.0
         utterance.volume = 1.0

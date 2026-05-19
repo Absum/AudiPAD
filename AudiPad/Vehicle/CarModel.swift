@@ -213,4 +213,118 @@ enum CarModel {
         root.pivot = SCNMatrix4MakeTranslation(0, baseY + (chassisH + cabinH)/2, 0)
         return root
     }
+
+    /// Try to load the bundled `SQ5.usdz` model and return a node ready
+    /// to drop into the annotation scene. Returns nil if the file is
+    /// missing, fails to parse, or has degenerate geometry — caller
+    /// should fall back to the procedural `makeNode()` in that case.
+    ///
+    /// Structure: an outer wrapper whose `eulerAngles.y` is owned by
+    /// `CarAnnotationView.applyTransform` (overwritten every frame),
+    /// wrapping an inner `model` node that holds the bake-in
+    /// transforms: uniform scale to ~4.66 m on the longest extent
+    /// (the car's length), pivot at the model's geometric centre so
+    /// yaw spins around the vertical axis, and an optional Y-axis
+    /// orientation correction to align the hood with +Z (which the
+    /// rest of the camera-orbit code assumes).
+    static func loadSQ5USDZ() -> SCNNode? {
+        guard let url = Bundle.main.url(forResource: "SQ5", withExtension: "usdz"),
+              let scene = try? SCNScene(url: url, options: nil)
+        else { return nil }
+
+        let wrapper = SCNNode()
+        let model = SCNNode()
+        for child in scene.rootNode.childNodes {
+            model.addChildNode(child)
+        }
+        wrapper.addChildNode(model)
+
+        let (boxMin, boxMax) = model.boundingBox
+        let extX = Float(boxMax.x - boxMin.x)
+        let extY = Float(boxMax.y - boxMin.y)
+        let extZ = Float(boxMax.z - boxMin.z)
+        let longest = max(extX, extY, extZ)
+        guard longest > 0 else { return nil }
+
+        // Bump 1.2× over real-world length — the orthographic camera
+        // makes 4.66 m read a little small at the annotation footprint,
+        // and a slightly oversized marker is easier to track at a glance
+        // while driving.
+        let targetLength: Float = 4.66 * 1.2
+        let s = targetLength / longest
+        model.scale = SCNVector3(s, s, s)
+
+        let cx = Float(boxMin.x + boxMax.x) / 2
+        let cy = Float(boxMin.y + boxMax.y) / 2
+        let cz = Float(boxMin.z + boxMax.z) / 2
+        model.pivot = SCNMatrix4MakeTranslation(cx, cy, cz)
+
+        // Tint the windows toward a privacy-glass dark gray. The
+        // stock USDZ ships them as light gray, which reads as plastic
+        // on a black body and breaks the SQ5 silhouette.
+        tintWindows(in: model)
+
+        // Pick the longest extent as the "length" axis and rotate so
+        // that axis maps to +Z (matches the procedural model's
+        // convention, which the annotation camera + yaw transform are
+        // built around). Most USDZ car exports come out +X-forward,
+        // so the X case is the common one; the others are safety
+        // nets if a future swap-in uses a different export.
+        if extX >= extY && extX >= extZ {
+            // Length along X → rotate -90° about Y so +X aligns with +Z.
+            model.eulerAngles = SCNVector3(0, -Float.pi / 2, 0)
+        } else if extZ >= extX && extZ >= extY {
+            // Already +Z-aligned, no rotation needed.
+        } else {
+            // Length along Y is unusual (model on its side?). Leave
+            // it alone — first render will surface the issue.
+        }
+
+        return wrapper
+    }
+
+    /// Walk every material in the hierarchy and swap window-like
+    /// materials' diffuse to a dark tint. Detection is by material
+    /// name first (most USDZ exports name them `glass`/`window`/etc.)
+    /// with a transparency-hint fallback so opaque-but-named windows
+    /// still get caught and translucent unnamed glass doesn't get
+    /// missed.
+    private static func tintWindows(in root: SCNNode) {
+        // Privacy-glass tone — very dark gray with a slight cool tint
+        // so the windows still read as separate from the body paint
+        // rather than collapsing into it.
+        let tint = UIColor(red: 0.05, green: 0.06, blue: 0.08, alpha: 1.0)
+
+        root.enumerateHierarchy { node, _ in
+            guard let geometry = node.geometry else { return }
+            for material in geometry.materials where isWindowMaterial(material) {
+                material.diffuse.contents = tint
+                // Force opacity — we want a solid tinted look, not
+                // see-through (which would expose any missing
+                // interior geometry).
+                material.transparency = 1.0
+                if material.lightingModel == .physicallyBased {
+                    material.metalness.contents = 0.4
+                    material.roughness.contents = 0.15
+                } else {
+                    material.specular.contents = UIColor.white
+                    material.shininess = 0.9
+                }
+            }
+        }
+    }
+
+    private static func isWindowMaterial(_ m: SCNMaterial) -> Bool {
+        let name = (m.name ?? "").lowercased()
+        if name.contains("glass")
+            || name.contains("window")
+            || name.contains("windshield")
+            || name.contains("windscreen") {
+            return true
+        }
+        // Fallback: materials with non-trivial transparency are almost
+        // always glass. Threshold below 0.95 so fully-opaque body
+        // paint (transparency = 1.0) isn't caught.
+        return m.transparency < 0.95
+    }
 }
