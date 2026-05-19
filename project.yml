@@ -15,6 +15,11 @@ settings:
     ALWAYS_SEARCH_USER_PATHS: NO
     CLANG_ENABLE_OBJC_ARC: YES
 
+packages:
+  SpotifyiOS:
+    url: https://github.com/spotify/ios-sdk
+    exactVersion: 5.0.1
+
 targets:
   AudiPad:
     type: application
@@ -24,6 +29,9 @@ targets:
       - path: AudiPad
         excludes:
           - Info.plist
+    dependencies:
+      - package: SpotifyiOS
+        product: SpotifyiOS
     info:
       path: AudiPad/Info.plist
       properties:
@@ -44,6 +52,16 @@ targets:
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         NSLocationWhenInUseUsageDescription: AudiPad uses your location to show your position on the map, follow you during navigation, and warn about nearby speed cameras.
+        # Custom URL scheme — Spotify auth callback returns here after the
+        # user taps "Authorize" in the Spotify app.
+        CFBundleURLTypes:
+          - CFBundleURLName: net.absum.audipad.spotify
+            CFBundleURLSchemes:
+              - audipad
+        # Required so iOS lets AudiPad open the Spotify app for the auth
+        # handshake (UIApplication.canOpenURL / openURL).
+        LSApplicationQueriesSchemes:
+          - spotify
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.absum.audipad
@@ -52,8 +70,8 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         CODE_SIGN_STYLE: Automatic
-        CODE_SIGNING_REQUIRED: NO
-        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: YES
+        CODE_SIGNING_ALLOWED: YES
         CURRENT_PROJECT_VERSION: "1"
         MARKETING_VERSION: "0.1.0"
         ENABLE_PREVIEWS: YES

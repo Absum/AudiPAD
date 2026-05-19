@@ -16,9 +16,12 @@ final class LocationService: NSObject, ObservableObject {
         self.status = manager.authorizationStatus
         super.init()
         manager.delegate = self
-        manager.desiredAccuracy = kCLLocationAccuracyBest
-        manager.distanceFilter = 5
-        manager.headingFilter = 2
+        manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+        // Stream every fix CoreLocation produces — the map camera
+        // interpolates between them, so denser input → smoother visual.
+        manager.distanceFilter = kCLDistanceFilterNone
+        manager.headingFilter = 1
+        manager.activityType = .automotiveNavigation
     }
 
     /// Ask for "When In Use" permission. Safe to call repeatedly — the system

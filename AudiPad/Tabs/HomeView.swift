@@ -150,13 +150,13 @@ struct HomeView: View {
 }
 
 // MARK: - Now playing strip (Home bottom)
+//
+// Same `SpotifyService` instance drives both this strip and the dedicated
+// `MediaView` — so connecting / authorising on either surface lights up
+// the other.
 
 private struct NowPlayingStrip: View {
-    // Mock state — replaced by `MPNowPlayingInfoCenter` once the Media tab's
-    // remote-command integration lands.
-    private let title = "Forge"
-    private let artist = "Justice"
-    private let isPlaying = true
+    @EnvironmentObject private var spotify: SpotifyService
 
     var body: some View {
         VStack(spacing: 0) {
@@ -166,15 +166,23 @@ private struct NowPlayingStrip: View {
                 .padding(.horizontal, 14)
 
             HStack(spacing: 14) {
-                // Album art (placeholder)
+                // Album art — Spotify artwork if we have it, fallback music.note.
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .fill(SQ5Colors.surfaceElevated)
                     .frame(width: 52, height: 52)
-                    .overlay(
-                        Image(systemName: "music.note")
-                            .font(.system(size: 22, weight: .light))
-                            .foregroundStyle(SQ5Colors.textTertiary)
-                    )
+                    .overlay {
+                        if let art = spotify.nowPlaying?.artwork {
+                            Image(uiImage: art)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 52, height: 52)
+                                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        } else {
+                            Image(systemName: "music.note")
+                                .font(.system(size: 22, weight: .light))
+                                .foregroundStyle(SQ5Colors.textTertiary)
+                        }
+                    }
                     .overlay(
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
                             .stroke(SQ5Colors.border, lineWidth: 1)
@@ -185,21 +193,45 @@ private struct NowPlayingStrip: View {
                         .font(.system(size: 9, weight: .semibold))
                         .tracking(1.8)
                         .foregroundStyle(SQ5Colors.textTertiary)
-                    Text(title)
-                        .font(SQ5Typography.subtitle)
-                        .foregroundStyle(SQ5Colors.textPrimary)
-                        .lineLimit(1)
-                    Text(artist)
-                        .font(SQ5Typography.caption)
-                        .foregroundStyle(SQ5Colors.textSecondary)
-                        .lineLimit(1)
+                    if let np = spotify.nowPlaying {
+                        Text(np.title)
+                            .font(SQ5Typography.subtitle)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                            .lineLimit(1)
+                        Text(np.artist)
+                            .font(SQ5Typography.caption)
+                            .foregroundStyle(SQ5Colors.textSecondary)
+                            .lineLimit(1)
+                    } else {
+                        Text(spotify.isConnected ? "Nothing playing" : "Spotify not connected")
+                            .font(SQ5Typography.subtitle)
+                            .foregroundStyle(SQ5Colors.textSecondary)
+                            .lineLimit(1)
+                        Text(spotify.isConnected ? "Start a track in Spotify"
+                                                 : "Open Media tab to connect")
+                            .font(SQ5Typography.caption)
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                            .lineLimit(1)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
                 HStack(spacing: 22) {
-                    TransportIcon(symbol: "backward.fill", size: 22)
-                    TransportIcon(symbol: isPlaying ? "pause.fill" : "play.fill", size: 30)
-                    TransportIcon(symbol: "forward.fill", size: 22)
+                    TransportIcon(symbol: "backward.fill",
+                                  size: 22,
+                                  enabled: spotify.isConnected) {
+                        spotify.previous()
+                    }
+                    TransportIcon(symbol: (spotify.nowPlaying?.isPaused ?? true) ? "play.fill" : "pause.fill",
+                                  size: 30,
+                                  enabled: spotify.isConnected) {
+                        spotify.togglePlayPause()
+                    }
+                    TransportIcon(symbol: "forward.fill",
+                                  size: 22,
+                                  enabled: spotify.isConnected) {
+                        spotify.next()
+                    }
                 }
             }
             .padding(.horizontal, 16)
@@ -211,13 +243,19 @@ private struct NowPlayingStrip: View {
 private struct TransportIcon: View {
     let symbol: String
     let size: CGFloat
+    let enabled: Bool
+    let action: () -> Void
 
     var body: some View {
-        Image(systemName: symbol)
-            .font(.system(size: size, weight: .semibold))
-            .foregroundStyle(SQ5Colors.textPrimary)
-            .frame(width: size + 18, height: size + 18)
-            .contentShape(Rectangle())
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: size, weight: .semibold))
+                .foregroundStyle(enabled ? SQ5Colors.textPrimary : SQ5Colors.textTertiary)
+                .frame(width: size + 18, height: size + 18)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
     }
 }
 

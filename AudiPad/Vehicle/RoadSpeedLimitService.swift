@@ -86,36 +86,38 @@ final class RoadSpeedLimitService: ObservableObject {
     private var ticker: Task<Void, Never>?
     private var lastOSMQueriedCoord: CLLocationCoordinate2D?
     private var lastDigiroadQueriedCoord: CLLocationCoordinate2D?
-    private var coordProvider: () -> CLLocationCoordinate2D? = { nil }
+    private var locationProvider: () -> CLLocation? = { nil }
 
     init() {
         loadCache()
     }
 
-    func start(coordProvider: @escaping () -> CLLocationCoordinate2D?) {
-        self.coordProvider = coordProvider
+    func start(locationProvider: @escaping () -> CLLocation?) {
+        self.locationProvider = locationProvider
         guard ticker == nil else { return }
         ticker = Task { [weak self] in
             guard let self else { return }
             // Initial pulls
-            if let coord = self.coordProvider() {
-                async let osm: () = self.fetchOSM(around: coord)
-                async let dig: () = self.fetchDigiroad(around: coord)
+            if let loc = self.locationProvider() {
+                let coord = loc.coordinate
+                async let osm: () = self.fetchOSM(around: loc)
+                async let dig: () = self.fetchDigiroad(around: loc)
                 async let vms: () = self.refreshVMSList()
                 async let apple: () = self.fetchAppleRoadName(at: coord)
                 _ = await (osm, dig, vms, apple)
-                self.recomputeVMSReading(for: coord)
+                self.recomputeVMSReading(for: loc)
             }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(15))
                 guard !Task.isCancelled else { break }
-                guard let coord = self.coordProvider() else { continue }
+                guard let loc = self.locationProvider() else { continue }
+                let coord = loc.coordinate
 
                 if self.shouldRefetchOSM(for: coord) {
-                    await self.fetchOSM(around: coord)
+                    await self.fetchOSM(around: loc)
                 }
                 if self.shouldRefetchDigiroad(for: coord) {
-                    await self.fetchDigiroad(around: coord)
+                    await self.fetchDigiroad(around: loc)
                 }
                 if self.shouldRefreshVMS() {
                     await self.refreshVMSList()
@@ -123,7 +125,7 @@ final class RoadSpeedLimitService: ObservableObject {
                 if self.shouldRefetchGeocode(for: coord) {
                     await self.fetchAppleRoadName(at: coord)
                 }
-                self.recomputeVMSReading(for: coord)
+                self.recomputeVMSReading(for: loc)
             }
         }
     }
@@ -142,7 +144,9 @@ final class RoadSpeedLimitService: ObservableObject {
         return here.distance(from: there) > Self.refetchDistanceM
     }
 
-    private func fetchOSM(around coord: CLLocationCoordinate2D) async {
+    private func fetchOSM(around loc: CLLocation) async {
+        let coord = loc.coordinate
+        let course: Double? = loc.course >= 0 ? loc.course : nil
         // Drop the `maxspeed` filter: we want road name + ref even on
         // streets without a tagged limit (e.g. residential lanes where
         // Digiroad supplies the limit but OSM has none). Speed-limit
@@ -169,35 +173,46 @@ final class RoadSpeedLimitService: ObservableObject {
             }
 
             let payload = try JSONDecoder().decode(OverpassWaysResponse.self, from: data)
-            let userLoc = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
             lastOSMQueriedCoord = coord
 
-            // Road identity: pick the absolute nearest highway way (whether
-            // or not it has maxspeed), so the bottom-of-map road panel
-            // populates on residential streets too. Stash separately —
-            // Apple Maps (CLGeocoder) provides the preferred name; OSM
-            // contributes the ref (road number, e.g. "E12") that Apple
-            // doesn't expose, and acts as a name fallback.
-            let nearestRoad = payload.elements
-                .map { way in (way, Self.nearestVertexDistance(way, to: userLoc)) }
-                .min(by: { $0.1 < $1.1 })
-            let tags = nearestRoad?.0.tags ?? [:]
+            // Road identity: pick the way whose nearest edge is closest to
+            // us — course-aligned when we have a valid course — so the
+            // bottom-of-map road panel reflects the road we're actually
+            // driving, not a parallel one whose vertices happen to sit
+            // nearer to our GPS. Without the course filter it falls back
+            // to plain edge proximity (slow / stationary cases).
+            let nearestRoad = Self.bestEdgeMatch(payload.elements,
+                                                 vertices: { Self.coords(for: $0) },
+                                                 at: coord, course: course,
+                                                 maxDistance: 35,
+                                                 courseTolerance: 35)
+            let tags = nearestRoad?.tags ?? [:]
             osmRoadName = tags["name"]
             osmRoadRef = tags["ref"] ?? tags["int_ref"]
             rebuildRoadInfo()
 
-            // Speed limit: must come from a way that actually has the tag.
-            let nearestWithLimit = payload.elements
-                .compactMap { way -> (limit: Int, dist: CLLocationDistance)? in
-                    guard let raw = way.tags?["maxspeed"],
-                          let limit = Self.parseMaxspeed(raw)
-                    else { return nil }
-                    let d = Self.nearestVertexDistance(way, to: userLoc)
-                    return (limit, d)
+            // Speed limit: from the matched way's own tag if present;
+            // otherwise pick the closest way *with* maxspeed using the
+            // same edge-based projection.
+            let limitFromMatched: Int? = {
+                guard let raw = nearestRoad?.tags?["maxspeed"] else { return nil }
+                return Self.parseMaxspeed(raw)
+            }()
+            let chosenLimit: Int? = limitFromMatched ?? {
+                let withLimit = payload.elements.filter {
+                    guard let raw = $0.tags?["maxspeed"] else { return false }
+                    return Self.parseMaxspeed(raw) != nil
                 }
-                .min(by: { $0.dist < $1.dist })
+                let nearest = Self.bestEdgeMatch(withLimit,
+                                                 vertices: { Self.coords(for: $0) },
+                                                 at: coord, course: course,
+                                                 maxDistance: 35,
+                                                 courseTolerance: 35)
+                guard let raw = nearest?.tags?["maxspeed"] else { return nil }
+                return Self.parseMaxspeed(raw)
+            }()
 
-            guard let n = nearestWithLimit else {
+            guard let raw = chosenLimit else {
                 osmReading = nil
                 lastError = nil
                 updateCurrent()
@@ -205,7 +220,7 @@ final class RoadSpeedLimitService: ObservableObject {
             }
 
             let now = Date()
-            let (limit, adjusted) = Self.applyFinlandWinterRule(n.limit, on: now)
+            let (limit, adjusted) = Self.applyFinlandWinterRule(raw, on: now)
             osmReading = Reading(limit: limit,
                                  source: .osm,
                                  appliedSeasonalAdjustment: adjusted,
@@ -217,6 +232,10 @@ final class RoadSpeedLimitService: ObservableObject {
         } catch {
             lastError = "OSM network: \(error.localizedDescription)"
         }
+    }
+
+    private static func coords(for way: OverpassWay) -> [CLLocationCoordinate2D] {
+        (way.geometry ?? []).map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
     }
 
     // MARK: - Digiroad fetch (Phase 3)
@@ -231,7 +250,9 @@ final class RoadSpeedLimitService: ObservableObject {
         return here.distance(from: there) > Self.refetchDistanceM
     }
 
-    private func fetchDigiroad(around coord: CLLocationCoordinate2D) async {
+    private func fetchDigiroad(around loc: CLLocation) async {
+        let coord = loc.coordinate
+        let course: Double? = loc.course >= 0 ? loc.course : nil
         let minLon = coord.longitude - Self.digiroadBBoxHalfLonDeg
         let minLat = coord.latitude  - Self.digiroadBBoxHalfLatDeg
         let maxLon = coord.longitude + Self.digiroadBBoxHalfLonDeg
@@ -285,25 +306,27 @@ final class RoadSpeedLimitService: ObservableObject {
                                              vertices: vertices)
             }
 
-            let userLoc = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
-            let nearest = digiroadSegments
-                .compactMap { seg -> (limit: Int, dist: CLLocationDistance)? in
-                    guard let limit = seg.limit, (10...130).contains(limit) else { return nil }
-                    let dist = seg.vertices
-                        .map { userLoc.distance(from: CLLocation(latitude: $0.latitude, longitude: $0.longitude)) }
-                        .min() ?? .infinity
-                    return (limit, dist)
-                }
-                .min(by: { $0.dist < $1.dist })
+            // Pick the segment whose nearest *edge* sits closest to the
+            // user, course-aligned when course is valid. Segments with no
+            // or out-of-range limit don't qualify (we want a usable limit).
+            let candidates = digiroadSegments.filter { seg in
+                guard let limit = seg.limit else { return false }
+                return (10...130).contains(limit)
+            }
+            let matched = Self.bestEdgeMatch(candidates,
+                                             vertices: { $0.vertices },
+                                             at: coord, course: course,
+                                             maxDistance: 35,
+                                             courseTolerance: 35)
 
-            guard let n = nearest else {
+            guard let n = matched, let limit = n.limit else {
                 digiroadReading = nil
                 lastError = nil
                 updateCurrent()
                 return
             }
 
-            digiroadReading = Reading(limit: n.limit,
+            digiroadReading = Reading(limit: limit,
                                       source: .tierekisteri,
                                       appliedSeasonalAdjustment: false,
                                       timestamp: Date())
@@ -380,6 +403,218 @@ final class RoadSpeedLimitService: ObservableObject {
         return bestDist <= maxDistance ? bestLink : nil
     }
 
+    /// Edge-based link resolver. Returns the link_id of the Digiroad
+    /// segment whose nearest *edge* (line between two consecutive
+    /// vertices) sits closest to `coord` — and, when a `course` is
+    /// provided, whose edge bearing aligns with that course.
+    ///
+    /// This is what `SpeedCameraMonitor`'s same-road gate uses, in
+    /// preference to the vertex-only `linkID(near:)`. Vertex-only snap
+    /// fails at intersections and on parallel roads because the
+    /// physically nearest vertex may belong to a different road than
+    /// the one we're actually driving on; course alignment + edge
+    /// projection picks the correct road of travel.
+    func linkID(snappedNear coord: CLLocationCoordinate2D,
+                course: Double? = nil,
+                maxDistance: CLLocationDistance = 35,
+                courseTolerance: Double = 35) -> String? {
+        let p = coord
+        let mPerLat = 111_320.0
+        let mPerLon = 111_320.0 * cos(p.latitude * .pi / 180)
+
+        var bestLink: String?
+        var bestDist: Double = .infinity
+
+        for seg in digiroadSegments {
+            let verts = seg.vertices
+            guard verts.count >= 2 else { continue }
+            for i in 0..<(verts.count - 1) {
+                let ax = (verts[i].longitude     - p.longitude) * mPerLon
+                let ay = (verts[i].latitude      - p.latitude)  * mPerLat
+                let bx = (verts[i + 1].longitude - p.longitude) * mPerLon
+                let by = (verts[i + 1].latitude  - p.latitude)  * mPerLat
+
+                let abx = bx - ax
+                let aby = by - ay
+                let len2 = abx * abx + aby * aby
+                if len2 < 1e-6 { continue }
+
+                // t = clamp(((P − A)·(B − A)) / |B − A|², 0, 1), P at origin.
+                let t = max(0, min(1, (-ax * abx + -ay * aby) / len2))
+                let footX = ax + t * abx
+                let footY = ay + t * aby
+                let dist = sqrt(footX * footX + footY * footY)
+                if dist >= bestDist || dist > maxDistance { continue }
+
+                // Course filter — only applied when course is valid.
+                if let course {
+                    let edgeBearing = ((atan2(abx, aby) * 180 / .pi) + 360)
+                        .truncatingRemainder(dividingBy: 360)
+                    let reverseBearing = (edgeBearing + 180)
+                        .truncatingRemainder(dividingBy: 360)
+                    let delta = min(
+                        Self.angularDelta(edgeBearing,    course),
+                        Self.angularDelta(reverseBearing, course)
+                    )
+                    if delta > courseTolerance { continue }
+                }
+
+                bestDist = dist
+                bestLink = seg.linkId
+            }
+        }
+        return bestLink
+    }
+
+    // MARK: - Road snap (map-matching)
+
+    /// Project `location` onto the nearest Digiroad road segment whose
+    /// edge bearing aligns with the user's course, returning the
+    /// perpendicular foot on that edge. Used by the map camera so the
+    /// displayed position rides the road centerline even with the small
+    /// lateral drift you get from consumer GPS.
+    ///
+    /// We compare edge bearing to course in both directions (forward + the
+    /// reverse) because a road segment can be traversed either way and the
+    /// vertex order is arbitrary. A 30° tolerance keeps us from snapping
+    /// to a perpendicular road that happens to pass within `maxDistance`.
+    ///
+    /// Returns nil when the user is genuinely off-road (parking lot, field
+    /// outside the cached bbox, gravel turn-off, etc.) — the caller falls
+    /// back to the raw GPS coord.
+    func snapped(_ location: CLLocation,
+                 maxDistance: CLLocationDistance = 35,
+                 courseTolerance: Double = 35) -> CLLocationCoordinate2D? {
+        // Course can be -1 at low speed / stationary. Don't bail in that
+        // case — still pick the nearest road within distance, just skip
+        // the bearing-alignment filter. Better to snap to a plausible
+        // road than to drift visibly off it while idling at a junction.
+        let course: Double? = location.course >= 0 ? location.course : nil
+        let p = location.coordinate
+
+        // Local equirectangular frame anchored at `p`. Good enough for
+        // segment-scale (a few hundred meters) projection math at Finnish
+        // latitudes — the lat/lon scaling stays constant within the
+        // search radius.
+        let mPerLat = 111_320.0
+        let mPerLon = 111_320.0 * cos(p.latitude * .pi / 180)
+
+        var bestFoot: CLLocationCoordinate2D?
+        var bestDist: Double = .infinity
+
+        for seg in digiroadSegments {
+            let verts = seg.vertices
+            guard verts.count >= 2 else { continue }
+            for i in 0..<(verts.count - 1) {
+                let ax = (verts[i].longitude     - p.longitude) * mPerLon
+                let ay = (verts[i].latitude      - p.latitude)  * mPerLat
+                let bx = (verts[i + 1].longitude - p.longitude) * mPerLon
+                let by = (verts[i + 1].latitude  - p.latitude)  * mPerLat
+
+                let abx = bx - ax
+                let aby = by - ay
+                let len2 = abx * abx + aby * aby
+                if len2 < 1e-6 { continue }
+
+                // t = clamp(((P − A)·(B − A)) / |B − A|², 0, 1), with P at origin.
+                let t = max(0, min(1, (-ax * abx + -ay * aby) / len2))
+                let footX = ax + t * abx
+                let footY = ay + t * aby
+                let dist = sqrt(footX * footX + footY * footY)
+                if dist >= bestDist || dist > maxDistance { continue }
+
+                // Edge bearing filter — only applied when course is valid.
+                if let course {
+                    let edgeBearing = ((atan2(abx, aby) * 180 / .pi) + 360)
+                        .truncatingRemainder(dividingBy: 360)
+                    let reverseBearing = (edgeBearing + 180)
+                        .truncatingRemainder(dividingBy: 360)
+                    let delta = min(
+                        Self.angularDelta(edgeBearing,    course),
+                        Self.angularDelta(reverseBearing, course)
+                    )
+                    if delta > courseTolerance { continue }
+                }
+
+                bestDist = dist
+                bestFoot = CLLocationCoordinate2D(
+                    latitude:  p.latitude  + footY / mPerLat,
+                    longitude: p.longitude + footX / mPerLon
+                )
+            }
+        }
+        return bestFoot
+    }
+
+    private static func angularDelta(_ a: Double, _ b: Double) -> Double {
+        let d = abs(a - b).truncatingRemainder(dividingBy: 360)
+        return min(d, 360 - d)
+    }
+
+    /// Pick the item in `items` whose nearest *edge* (line between two
+    /// consecutive vertices) sits closest to `coord`, with optional
+    /// course-bearing alignment. Returns nil when no candidate's edge
+    /// projects within `maxDistance`, or when course-filtered out.
+    ///
+    /// Same algorithm used by `snapped(_:)` and the link-ID resolver —
+    /// generalised so OSM ways, Digiroad segments, and any other
+    /// vertex-list-bearing data can use it. Avoids the "nearest vertex
+    /// belongs to a different road" failure mode that vertex-only snap
+    /// produces at intersections and on parallel roads.
+    private static func bestEdgeMatch<T>(
+        _ items: [T],
+        vertices: (T) -> [CLLocationCoordinate2D],
+        at coord: CLLocationCoordinate2D,
+        course: Double?,
+        maxDistance: CLLocationDistance,
+        courseTolerance: Double
+    ) -> T? {
+        let p = coord
+        let mPerLat = 111_320.0
+        let mPerLon = 111_320.0 * cos(p.latitude * .pi / 180)
+
+        var best: T?
+        var bestDist: Double = .infinity
+
+        for item in items {
+            let verts = vertices(item)
+            guard verts.count >= 2 else { continue }
+            for i in 0..<(verts.count - 1) {
+                let ax = (verts[i].longitude     - p.longitude) * mPerLon
+                let ay = (verts[i].latitude      - p.latitude)  * mPerLat
+                let bx = (verts[i + 1].longitude - p.longitude) * mPerLon
+                let by = (verts[i + 1].latitude  - p.latitude)  * mPerLat
+
+                let abx = bx - ax
+                let aby = by - ay
+                let len2 = abx * abx + aby * aby
+                if len2 < 1e-6 { continue }
+
+                let t = max(0, min(1, (-ax * abx + -ay * aby) / len2))
+                let footX = ax + t * abx
+                let footY = ay + t * aby
+                let dist = sqrt(footX * footX + footY * footY)
+                if dist >= bestDist || dist > maxDistance { continue }
+
+                if let course {
+                    let edgeBearing = ((atan2(abx, aby) * 180 / .pi) + 360)
+                        .truncatingRemainder(dividingBy: 360)
+                    let reverseBearing = (edgeBearing + 180)
+                        .truncatingRemainder(dividingBy: 360)
+                    let delta = min(
+                        angularDelta(edgeBearing,    course),
+                        angularDelta(reverseBearing, course)
+                    )
+                    if delta > courseTolerance { continue }
+                }
+
+                bestDist = dist
+                best = item
+            }
+        }
+        return best
+    }
+
     // MARK: - VMS fetch (Phase 2)
 
     private func shouldRefreshVMS() -> Bool {
@@ -427,19 +662,44 @@ final class RoadSpeedLimitService: ObservableObject {
         }
     }
 
-    private func recomputeVMSReading(for coord: CLLocationCoordinate2D) {
+    private func recomputeVMSReading(for loc: CLLocation) {
+        let coord = loc.coordinate
         let userLoc = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
-        let nearest = vmsSigns
-            .map { sign -> (VMSSign, CLLocationDistance) in
+        let course: Double? = loc.course >= 0 ? loc.course : nil
+
+        // Score each in-radius sign two ways:
+        //   1. Does it sit on the same Digiroad link as the user?
+        //   2. How far is it from the user (raw)?
+        // Same-link signs always beat off-link signs. Within each group,
+        // we pick by raw proximity. Avoids the "VMS sign on parallel
+        // motorway overrides the local 60 limit" failure mode.
+        let userLink = linkID(snappedNear: coord, course: course)
+
+        let scored = vmsSigns
+            .map { sign -> (sign: VMSSign, sameLink: Bool, dist: CLLocationDistance) in
                 let dist = userLoc.distance(from: CLLocation(latitude: sign.coord.latitude,
                                                              longitude: sign.coord.longitude))
-                return (sign, dist)
+                let signLink = self.linkID(snappedNear: sign.coord, course: nil)
+                let sameLink = (userLink != nil && signLink == userLink)
+                return (sign, sameLink, dist)
             }
-            .filter { $0.1 <= Self.vmsRadiusM }
-            .min(by: { $0.1 < $1.1 })
+            .filter { $0.dist <= Self.vmsRadiusM }
 
-        if let n = nearest {
-            vmsReading = Reading(limit: n.0.limit,
+        // Same-link first; within each tier, closest wins.
+        let best = scored
+            .sorted { (a, b) in
+                if a.sameLink != b.sameLink { return a.sameLink }
+                return a.dist < b.dist
+            }
+            .first
+
+        // If we have any same-link sign, use it; otherwise fall back to
+        // the absolute closest (covers areas where the user's coord
+        // doesn't snap to Digiroad at all, e.g. driveways).
+        let chosen: VMSSign? = best.map { $0.sign }
+
+        if let sign = chosen, (best?.sameLink == true || userLink == nil) {
+            vmsReading = Reading(limit: sign.limit,
                                  source: .vms,
                                  appliedSeasonalAdjustment: false,
                                  timestamp: Date())

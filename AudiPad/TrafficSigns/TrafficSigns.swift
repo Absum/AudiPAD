@@ -51,6 +51,11 @@ struct SpeedLimitSign: View {
         GeometryReader { geo in
             let side = min(geo.size.width, geo.size.height)
             let ringWidth = side * 0.11
+            // 3-digit speeds (100+) need a much smaller font so they fit
+            // inside the red ring's inner diameter (~78% of side). 1-2 digit
+            // signs sit comfortably at the same scale we use for the
+            // 3-digit case + some breathing room.
+            let fontScale: CGFloat = speed >= 100 ? 0.32 : 0.40
 
             ZStack {
                 Circle()
@@ -61,9 +66,9 @@ struct SpeedLimitSign: View {
                         lineWidth: ringWidth
                     )
                 Text("\(speed)")
-                    .font(.system(size: side * 0.50, weight: .heavy, design: .default))
+                    .font(.system(size: side * fontScale, weight: .heavy, design: .default))
                     .foregroundStyle(.black)
-                    .minimumScaleFactor(0.5)
+                    .minimumScaleFactor(0.6)
                     .lineLimit(1)
             }
             .frame(width: side, height: side)
@@ -83,6 +88,8 @@ struct EndOfSpeedLimitSign: View {
             let side = min(geo.size.width, geo.size.height)
             let ringWidth = side * 0.08
             let strikeWidth = side * 0.07
+            // Same digit-aware sizing as the active speed-limit sign.
+            let fontScale: CGFloat = speed >= 100 ? 0.30 : 0.38
 
             ZStack {
                 Circle()
@@ -92,9 +99,9 @@ struct EndOfSpeedLimitSign: View {
 
                 // Number, slightly dimmed
                 Text("\(speed)")
-                    .font(.system(size: side * 0.48, weight: .heavy))
+                    .font(.system(size: side * fontScale, weight: .heavy))
                     .foregroundStyle(Color(white: 0.30))
-                    .minimumScaleFactor(0.5)
+                    .minimumScaleFactor(0.6)
                     .lineLimit(1)
 
                 // Diagonal strikethrough (top-right to bottom-left)

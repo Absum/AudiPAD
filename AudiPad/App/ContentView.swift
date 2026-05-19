@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreLocation
 
 struct ContentView: View {
     @State private var selectedTab: AppTab = .home
@@ -79,8 +80,14 @@ struct ContentView: View {
                 // bench without location permission.
                 locationService?.location?.coordinate ?? vehicle?.snapshot.coordinate
             })
-            roadLimits.start(coordProvider: { [weak locationService, weak vehicle] in
-                locationService?.location?.coordinate ?? vehicle?.snapshot.coordinate
+            roadLimits.start(locationProvider: { [weak locationService, weak vehicle] in
+                if let loc = locationService?.location { return loc }
+                // Fall back to the simulated vehicle coord with no course
+                // signal so the speed-limit lookup degrades gracefully
+                // to plain edge proximity on the bench.
+                guard let snap = vehicle?.snapshot else { return nil }
+                return CLLocation(latitude: snap.coordinate.latitude,
+                                  longitude: snap.coordinate.longitude)
             })
             signHistory.subscribe(to: roadLimits.$current)
         }
@@ -103,13 +110,17 @@ struct ContentView: View {
             guard let loc else { return }
             cameras.update(cameras: cameraService.cameras,
                            userLocation: loc,
-                           linkID: { [roadLimits] coord in roadLimits.linkID(near: coord) })
+                           linkID: { [roadLimits] coord, course in
+                               roadLimits.linkID(snappedNear: coord, course: course)
+                           })
         }
         .onReceive(cameraService.$cameras) { latest in
             guard let loc = locationService.location else { return }
             cameras.update(cameras: latest,
                            userLocation: loc,
-                           linkID: { [roadLimits] coord in roadLimits.linkID(near: coord) })
+                           linkID: { [roadLimits] coord, course in
+                               roadLimits.linkID(snappedNear: coord, course: course)
+                           })
         }
         .onReceive(traffic.$incidents) { incidents in
             trafficMonitor.update(incidents: incidents,

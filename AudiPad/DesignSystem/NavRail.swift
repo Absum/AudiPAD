@@ -72,7 +72,7 @@ struct NavRail: View {
             }
             .padding(.bottom, 22)
         }
-        .frame(width: 110)
+        .frame(width: 124)
         .background(
             SQ5Colors.background
                 .overlay(alignment: .trailing) {
@@ -97,13 +97,13 @@ private struct NavRailButton: View {
                     .fill(isSelected ? SQ5Colors.accent : Color.clear)
                     .frame(width: 3)
 
-                VStack(spacing: 6) {
+                VStack(spacing: 8) {
                     Image(systemName: tab.icon)
-                        .font(.system(size: 26, weight: isSelected ? .semibold : .regular))
+                        .font(.system(size: 32, weight: isSelected ? .semibold : .regular))
                         .foregroundStyle(isSelected ? SQ5Colors.textPrimary : SQ5Colors.textTertiary)
-                        .frame(height: 30)
+                        .frame(height: 36)
                     Text(tab.label.uppercased())
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
                         .tracking(1.8)
                         .foregroundStyle(isSelected ? SQ5Colors.textSecondary : SQ5Colors.textTertiary)
                 }
