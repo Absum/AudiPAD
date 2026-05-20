@@ -56,15 +56,17 @@ struct TrafficAlertBanner: View {
 
     private var headline: String {
         switch incident.category {
-        case .accident: return "ACCIDENT AHEAD"
-        case .closure:  return "ROAD CLOSED AHEAD"
+        case .accident:  return "ACCIDENT AHEAD"
+        case .closure:   return "ROAD CLOSED AHEAD"
+        case .roadworks: return "ROADWORKS AHEAD"
         }
     }
 
     private var categoryIcon: String {
         switch incident.category {
-        case .accident: return "exclamationmark.triangle.fill"
-        case .closure:  return "xmark.octagon.fill"
+        case .accident:  return "exclamationmark.triangle.fill"
+        case .closure:   return "xmark.octagon.fill"
+        case .roadworks: return "cone.fill"
         }
     }
 

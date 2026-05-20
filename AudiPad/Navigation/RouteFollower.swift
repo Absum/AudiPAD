@@ -63,15 +63,34 @@ final class RouteFollower: ObservableObject {
     private var totalRouteDistance: CLLocationDistance = 0
     private var expectedTravelTime: TimeInterval = 0
 
+    /// Polyline vertices flattened once per route — `polyline.points()`
+    /// returns a raw `UnsafeMutablePointer` and copying into a Swift
+    /// array each fix is what made `snap` the dominant CPU cost during
+    /// nav. Cached here and reused for every `applyLocation` call.
+    private var polylinePoints: [MKMapPoint] = []
+
+    /// Cumulative distance from the polyline start to vertex `i`.
+    /// Length `polylinePoints.count`. Segment `i` runs from vertex `i`
+    /// (cum=cumAtVertex[i]) to vertex `i+1` (cum=cumAtVertex[i+1]).
+    private var cumAtVertex: [CLLocationDistance] = []
+
+    /// Index of the polyline segment the user was last snapped to.
+    /// Used as the centre of the search window in `incrementalSnap`,
+    /// so we examine ~30 segments per fix instead of all N.
+    private var currentSegmentIndex: Int = 0
+
     /// Replace the active route. Resets internal step state. Pass nil
     /// to stop following.
     func setRoute(_ route: MKRoute?) {
         self.route = route
         self.currentStepIndex = 0
+        self.currentSegmentIndex = 0
         guard let route else {
             stepEndDistances = []
             totalRouteDistance = 0
             expectedTravelTime = 0
+            polylinePoints = []
+            cumAtVertex = []
             if progress != nil { progress = nil }
             return
         }
@@ -85,15 +104,40 @@ final class RouteFollower: ObservableObject {
         stepEndDistances = ends
         totalRouteDistance = cumulative
         expectedTravelTime = route.expectedTravelTime
+
+        // Snapshot polyline vertices + per-vertex cumulative distance.
+        let n = route.polyline.pointCount
+        if n >= 2 {
+            let raw = route.polyline.points()
+            var pts: [MKMapPoint] = []
+            pts.reserveCapacity(n)
+            var cums: [CLLocationDistance] = []
+            cums.reserveCapacity(n)
+            var c: CLLocationDistance = 0
+            pts.append(raw[0])
+            cums.append(0)
+            for i in 1..<n {
+                c += raw[i - 1].distance(to: raw[i])
+                pts.append(raw[i])
+                cums.append(c)
+            }
+            polylinePoints = pts
+            cumAtVertex = cums
+        } else {
+            polylinePoints = []
+            cumAtVertex = []
+        }
     }
 
     /// Feed a fresh user location. Snaps it onto the route polyline,
     /// advances the current step index if we've passed one or more
     /// maneuver waypoints, and publishes a new `Progress`.
     func applyLocation(_ loc: CLLocation) {
-        guard let route, !route.steps.isEmpty, !stepEndDistances.isEmpty else { return }
+        guard let route, !route.steps.isEmpty, !stepEndDistances.isEmpty,
+              polylinePoints.count >= 2 else { return }
 
-        let (snapped, traveled, lateralM) = Self.snap(loc.coordinate, to: route.polyline)
+        let (snapped, traveled, lateralM, segIdx) = incrementalSnap(loc.coordinate)
+        currentSegmentIndex = segIdx
 
         // Advance currentStepIndex while we've passed the end of the
         // current step. Bounded by the last step so we don't run off
@@ -129,40 +173,79 @@ final class RouteFollower: ObservableObject {
 
     // MARK: - Geometry helpers
 
-    /// Snap `coord` onto `polyline`. Returns the closest point on the
-    /// polyline (snapped), the cumulative distance from the polyline
-    /// start to that point (traveled), and the perpendicular distance
-    /// in meters from `coord` to the snapped point (lateral).
-    private static func snap(_ coord: CLLocationCoordinate2D,
-                             to polyline: MKPolyline) -> (
+    /// Search window around `currentSegmentIndex` for the next snap.
+    /// At 10 Hz with ~50 km/h speed the user advances roughly one
+    /// 10 m polyline segment per fix, so 30 forward segments covers
+    /// ~300 m of travel in a single tick — far more than any single
+    /// GPS update could cross. 2 segments backward absorbs minor GPS
+    /// jitter that pulls the snap slightly behind the previous fix.
+    private static let snapWindowBackward = 2
+    private static let snapWindowForward = 30
+
+    /// Acceptance threshold for a windowed snap. If the best lateral
+    /// inside the window is worse than this, the user has either
+    /// jumped (tunnel exit, GPS warp) or is genuinely off-route — do
+    /// a full scan to recover. The re-route detector watches the
+    /// post-recovery lateral and will reroute if needed.
+    private static let snapWindowAcceptMeters: CLLocationDistance = 80
+
+    /// Snap `coord` to the route polyline using an incremental window
+    /// around `currentSegmentIndex`. Falls back to a full scan only if
+    /// the window's best match is unreasonably far (>80 m lateral),
+    /// which makes the typical-case cost O(window) instead of O(N) per
+    /// location update.
+    private func incrementalSnap(_ coord: CLLocationCoordinate2D) -> (
         snapped: CLLocationCoordinate2D,
         traveled: CLLocationDistance,
-        lateral: CLLocationDistance
+        lateral: CLLocationDistance,
+        segmentIndex: Int
     ) {
-        let n = polyline.pointCount
-        guard n >= 2 else { return (coord, 0, 0) }
+        let n = polylinePoints.count
+        let lastSeg = n - 2
         let userPt = MKMapPoint(coord)
-        let pts = polyline.points()
+        let lo = max(0, currentSegmentIndex - Self.snapWindowBackward)
+        let hi = min(lastSeg, currentSegmentIndex + Self.snapWindowForward)
 
+        let windowed = bestSnap(userPt: userPt, lo: lo, hi: hi)
+        if windowed.lateral <= Self.snapWindowAcceptMeters {
+            return windowed
+        }
+        // Window missed → user is far enough off-track that the snap
+        // could be wrong. Do a full scan; the re-route detector reads
+        // the resulting lateral and reroutes if appropriate.
+        return bestSnap(userPt: userPt, lo: 0, hi: lastSeg)
+    }
+
+    /// Inner loop: scan segments `lo...hi` (inclusive) and return the
+    /// best snap. Reads cached `polylinePoints` + `cumAtVertex` so it
+    /// touches no Objective-C/MapKit machinery per iteration.
+    private func bestSnap(userPt: MKMapPoint,
+                          lo: Int,
+                          hi: Int) -> (
+        snapped: CLLocationCoordinate2D,
+        traveled: CLLocationDistance,
+        lateral: CLLocationDistance,
+        segmentIndex: Int
+    ) {
         var bestLateral = Double.infinity
         var bestTraveled: Double = 0
-        var bestFoot = pts[0]
-        var cumulative: Double = 0
+        var bestFoot = polylinePoints[lo]
+        var bestSeg = lo
 
-        for i in 0..<(n - 1) {
-            let a = pts[i]
-            let b = pts[i + 1]
-            let segLen = a.distance(to: b)
-            let (foot, t) = projection(of: userPt, onto: a, b: b)
+        for i in lo...hi {
+            let a = polylinePoints[i]
+            let b = polylinePoints[i + 1]
+            let segLen = cumAtVertex[i + 1] - cumAtVertex[i]
+            let (foot, t) = Self.projection(of: userPt, onto: a, b: b)
             let lateralM = userPt.distance(to: foot)
             if lateralM < bestLateral {
                 bestLateral = lateralM
-                bestTraveled = cumulative + segLen * t
+                bestTraveled = cumAtVertex[i] + segLen * t
                 bestFoot = foot
+                bestSeg = i
             }
-            cumulative += segLen
         }
-        return (bestFoot.coordinate, bestTraveled, bestLateral)
+        return (bestFoot.coordinate, bestTraveled, bestLateral, bestSeg)
     }
 
     /// Project `p` onto the line segment from `a` to `b`. Returns the

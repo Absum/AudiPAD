@@ -6,7 +6,7 @@ import CoreLocation
 /// for the nearest severe one within ~20 km.
 struct TrafficIncident: Identifiable, Hashable {
     enum Severity { case minor, major, critical }
-    enum Category { case accident, closure }
+    enum Category { case accident, closure, roadworks }
 
     let id: UUID
     /// Stable identifier from the Digitraffic feed — used for dedup
@@ -22,6 +22,12 @@ struct TrafficIncident: Identifiable, Hashable {
     let detail: String?
     let validFrom: Date
     let validTo: Date
+    /// Temporary speed limit (km/h) attached to this incident, when
+    /// Digitraffic includes a `Nopeusrajoitus` feature. Used by the
+    /// Map tab to override the static Digiroad/OSM limit inside an
+    /// active roadwork zone — the speedometer ring shrinks to the
+    /// roadwork's posted limit.
+    let tempSpeedLimit: Int?
 
     static func == (lhs: TrafficIncident, rhs: TrafficIncident) -> Bool {
         lhs.situationId == rhs.situationId
@@ -37,6 +43,7 @@ extension TrafficIncident: Codable {
     enum CodingKeys: String, CodingKey {
         case id, situationId, latitude, longitude
         case severity, category, headline, detail, validFrom, validTo
+        case tempSpeedLimit
     }
 
     init(from decoder: Decoder) throws {
@@ -52,6 +59,7 @@ extension TrafficIncident: Codable {
         self.detail = try c.decodeIfPresent(String.self, forKey: .detail)
         self.validFrom = try c.decode(Date.self, forKey: .validFrom)
         self.validTo = try c.decode(Date.self, forKey: .validTo)
+        self.tempSpeedLimit = try c.decodeIfPresent(Int.self, forKey: .tempSpeedLimit)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -66,6 +74,7 @@ extension TrafficIncident: Codable {
         try c.encodeIfPresent(detail, forKey: .detail)
         try c.encode(validFrom, forKey: .validFrom)
         try c.encode(validTo, forKey: .validTo)
+        try c.encodeIfPresent(tempSpeedLimit, forKey: .tempSpeedLimit)
     }
 }
 

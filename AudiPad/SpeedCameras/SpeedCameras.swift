@@ -162,7 +162,10 @@ final class SpeedCameraMonitor: ObservableObject {
             let camLoc = CLLocation(latitude: stuck.coordinate.latitude,
                                     longitude: stuck.coordinate.longitude)
             let dist = loc.distance(from: camLoc)
-            let stillSameRoad = sameRoadAs(stuck, userLink: userLinkId, snap: linkID)
+            let stillSameRoad = sameRoadAs(stuck,
+                                            userLocation: loc,
+                                            userLink: userLinkId,
+                                            snap: linkID)
             // "Passed" = bearing from user→camera is now > 90° off the
             // user's course. The approach cone was ±45° on entry, so a
             // delta past 90° means the camera is to our side/rear, not
@@ -231,7 +234,10 @@ final class SpeedCameraMonitor: ObservableObject {
                 }
 
                 // Same-road gate — strict when the user has a known link.
-                guard sameRoadAs(cam, userLink: userLinkId, snap: linkID) else {
+                guard sameRoadAs(cam,
+                                 userLocation: loc,
+                                 userLink: userLinkId,
+                                 snap: linkID) else {
                     return nil
                 }
 
@@ -253,18 +259,47 @@ final class SpeedCameraMonitor: ObservableObject {
         stickyCameraID = nearest?.0.id
     }
 
-    /// Same-road gate. Strict when the user resolves to a Digiroad link:
-    /// the camera must resolve to the same link. Permissive when the
-    /// user doesn't resolve — areas outside Digiroad coverage fall back
-    /// to heading + facing.
+    /// Same-road gate. Two paths:
+    ///   1. **Strict link match** (fast-path) — when the user resolves to a
+    ///      Digiroad link AND the camera resolves to the same link, definitely
+    ///      same road. Pass immediately.
+    ///   2. **Angular alignment** — when 1 fails, the camera still counts as
+    ///      same-road if the bearing from the user to the camera is within
+    ///      `sameRoadAngularToleranceDeg` of the user's course. This scales
+    ///      naturally with distance: ~9 m lateral at 100 m, ~70 m at 800 m
+    ///      for the 5° default. The previous fixed-perpendicular threshold
+    ///      passed only `asin(30/800) ≈ 2°` at long range, so distant
+    ///      cameras got rejected by ordinary GPS course noise (3–5°) — the
+    ///      reason a real drive saw warnings firing only at ~200 m.
     private func sameRoadAs(_ cam: SpeedCamera,
+                            userLocation: CLLocation,
                             userLink: String?,
                             snap: ((CLLocationCoordinate2D, Double?) -> String?)?) -> Bool {
-        guard let snap, let userLink else { return true }
-        // No course for the camera — it's a static point. We just want the
-        // closest road by edge geometry.
-        return snap(cam.coordinate, nil) == userLink
+        // 1. Strict link match — definitely same road.
+        if let snap, let userLink, snap(cam.coordinate, nil) == userLink {
+            return true
+        }
+        // 2. Angular: bearing-to-camera vs course.
+        guard userLocation.course >= 0 else {
+            // No course → permissive when either side doesn't resolve
+            // (matches the original behaviour for stationary state).
+            return snap == nil || userLink == nil
+        }
+        let bearing = Self.bearing(from: userLocation.coordinate,
+                                   to: cam.coordinate)
+        let delta = Self.angularDelta(userLocation.course, bearing)
+        return delta <= sameRoadAngularToleranceDeg
     }
+
+    /// Maximum angular delta between the user's course and the bearing
+    /// to the camera at which the camera still counts as "same road".
+    /// 5° accommodates typical GPS course noise (3–5° even on straight
+    /// motorway) while still rejecting perpendicular and most parallel
+    /// roads. Lateral coverage scales linearly with distance, so a
+    /// camera 200 m ahead must be within ~17 m lateral, while one at
+    /// 800 m can be up to ~70 m off — appropriate, because a fixed
+    /// 30 m would block real same-road cameras at long range.
+    private let sameRoadAngularToleranceDeg: Double = 5
 
     // MARK: - Geometry helpers
 
@@ -285,6 +320,33 @@ final class SpeedCameraMonitor: ObservableObject {
     static func angularDelta(_ a: Double, _ b: Double) -> Double {
         let diff = abs(a - b).truncatingRemainder(dividingBy: 360)
         return min(diff, 360 - diff)
+    }
+
+    /// Perpendicular distance in metres from `target` to the infinite
+    /// line through `origin` with bearing `courseDeg`. Treats the
+    /// nearby surface as a flat tangent plane — fine for the ≤ 800 m
+    /// alert radius we care about here.
+    ///
+    /// Used by the same-road gate to decide whether a camera lies on
+    /// the user's road of travel (perp distance small) or on a
+    /// parallel road further to the side (perp distance large).
+    static func perpendicularDistanceFromHeadingLine(
+        target: CLLocationCoordinate2D,
+        origin: CLLocationCoordinate2D,
+        courseDeg: Double
+    ) -> CLLocationDistance {
+        let mPerLat = 111_320.0
+        let mPerLon = 111_320.0 * cos(origin.latitude * .pi / 180)
+        // Local east-north coordinates of the camera relative to the user.
+        let dxE = (target.longitude - origin.longitude) * mPerLon
+        let dyN = (target.latitude  - origin.latitude)  * mPerLat
+        // Heading-line direction unit vector in the same E/N frame.
+        // Course is compass: 0° = N, 90° = E, clockwise.
+        let courseRad = courseDeg * .pi / 180
+        let lineE = sin(courseRad)
+        let lineN = cos(courseRad)
+        // Perpendicular distance = |cross product of (dE, dN) and (lineE, lineN)|.
+        return abs(dxE * lineN - dyN * lineE)
     }
 }
 

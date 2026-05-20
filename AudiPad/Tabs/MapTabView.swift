@@ -67,10 +67,20 @@ struct MapTabView: View {
             VStack {
                 Spacer()
                 VStack(alignment: .leading, spacing: 12) {
+                    // Effective speed limit: a roadwork-zone temp limit
+                    // wins over the static Digiroad/OSM limit. The
+                    // speedometer ring shrinks accordingly and the
+                    // road-info panel surfaces a small cone next to
+                    // the road name.
+                    let userCoord = location.location?.coordinate
+                    let temp = userCoord.flatMap { traffic.tempSpeedLimit(near: $0) }
+                    let inZone = userCoord.map { traffic.isInRoadworkZone(near: $0) } ?? false
+                    let effectiveLimit = temp ?? roadLimits.current?.limit
+
                     if showSpeedometer || showBoostGauge {
                         HStack(alignment: .top, spacing: 12) {
                             if showSpeedometer {
-                                SpeedometerCard(limitKph: roadLimits.current?.limit)
+                                SpeedometerCard(limitKph: effectiveLimit)
                             }
                             if showBoostGauge {
                                 BoostGaugeCard()
@@ -78,7 +88,8 @@ struct MapTabView: View {
                         }
                     }
                     RoadInfoPanel(road: roadLimits.currentRoad,
-                                  limit: roadLimits.current?.limit)
+                                  limit: effectiveLimit,
+                                  isInRoadworkZone: inZone)
                 }
                 .padding(.leading, 24)
                 // Bump the bottom inset only while the pre-start
@@ -242,6 +253,16 @@ struct MapTabView: View {
                         .padding(.horizontal, 26)
                         .padding(.bottom, 6)
                     }
+
+                    // Camera warning above the search overlay too —
+                    // the driver shouldn't lose the alert mid-search.
+                    if let approach = cameraMonitor.nearestApproaching {
+                        SpeedCameraAlertBanner(approach: approach)
+                            .padding(.horizontal, 26)
+                            .padding(.bottom, 6)
+                            .transition(.move(edge: .top)
+                                        .combined(with: .opacity))
+                    }
                 } else {
                     // Collapsed: search button on the left, now-playing
                     // strip directly to its right. No card chrome on the
@@ -282,6 +303,17 @@ struct MapTabView: View {
                     .padding(.horizontal, 26)
                     .padding(.top, 4)
                     .padding(.bottom, 6)
+
+                    // Camera warning also surfaces here when no route
+                    // is active — ContentView's overlay skips the map
+                    // tab so this is the only render path on the map.
+                    if let approach = cameraMonitor.nearestApproaching {
+                        SpeedCameraAlertBanner(approach: approach)
+                            .padding(.horizontal, 26)
+                            .padding(.bottom, 6)
+                            .transition(.move(edge: .top)
+                                        .combined(with: .opacity))
+                    }
                 }
 
                 Spacer()
@@ -1433,6 +1465,11 @@ private struct BoostGaugeCard: View {
 private struct RoadInfoPanel: View {
     let road: RoadSpeedLimitService.RoadInfo?
     let limit: Int?
+    /// True when the driver is currently within a Digitraffic roadwork
+    /// zone — renders a small cone badge next to the road name so the
+    /// lowered limit on the speedometer reads as roadwork-driven and
+    /// not as a permanent change.
+    var isInRoadworkZone: Bool = false
 
     private var hasAnyContent: Bool {
         (road?.name != nil) || (road?.ref != nil) || (limit != nil)
@@ -1449,15 +1486,25 @@ private struct RoadInfoPanel: View {
                     if let ref = road?.ref, !ref.isEmpty {
                         RoadShieldStack(ref: ref)
                     }
-                    if let name = road?.name, !name.isEmpty {
-                        Text(name)
-                            .font(.system(size: 27, weight: .medium))
-                            .foregroundStyle(SQ5Colors.textPrimary)
-                            .lineLimit(1)
-                    } else if road?.ref == nil {
-                        Text("Off road")
-                            .font(.system(size: 27, weight: .medium))
-                            .foregroundStyle(SQ5Colors.textSecondary)
+                    HStack(spacing: 10) {
+                        if let name = road?.name, !name.isEmpty {
+                            Text(name)
+                                .font(.system(size: 27, weight: .medium))
+                                .foregroundStyle(SQ5Colors.textPrimary)
+                                .lineLimit(1)
+                        } else if road?.ref == nil {
+                            Text("Off road")
+                                .font(.system(size: 27, weight: .medium))
+                                .foregroundStyle(SQ5Colors.textSecondary)
+                        }
+                        if isInRoadworkZone {
+                            // Compact "you're in a roadwork zone" badge.
+                            // Same `SQ5Colors.warning` as the cone pins on
+                            // the map so the two read as the same signal.
+                            Image(systemName: "cone.fill")
+                                .font(.system(size: 22, weight: .semibold))
+                                .foregroundStyle(SQ5Colors.warning)
+                        }
                     }
                 }
             }
@@ -2223,7 +2270,13 @@ private struct MapBackground: UIViewRepresentable {
                 view.canShowCallout = true
                 view.titleVisibility = .visible
                 view.transform = CGAffineTransform(scaleX: 0.78, y: 0.78)
-                view.displayPriority = .defaultHigh
+                // `.required` so MapKit never culls the camera when the
+                // car annotation (also .required) overlaps it on
+                // approach. Without this, MapKit collision treats the
+                // camera as `.defaultHigh` and hides it under the car
+                // — the "disappears when close, reappears when past"
+                // behaviour seen during a real drive.
+                view.displayPriority = .required
                 return view
             }
 
@@ -2410,8 +2463,9 @@ private final class TrafficIncidentAnnotation: NSObject, MKAnnotation {
         case .critical: self.markerColor = UIColor(SQ5Colors.danger)
         }
         switch incident.category {
-        case .accident: self.glyphSymbol = "exclamationmark.triangle.fill"
-        case .closure:  self.glyphSymbol = "xmark.octagon.fill"
+        case .accident:  self.glyphSymbol = "exclamationmark.triangle.fill"
+        case .closure:   self.glyphSymbol = "xmark.octagon.fill"
+        case .roadworks: self.glyphSymbol = "cone.fill"
         }
         super.init()
     }

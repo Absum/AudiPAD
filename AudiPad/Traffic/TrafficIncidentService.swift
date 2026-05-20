@@ -52,6 +52,42 @@ final class TrafficIncidentService: ObservableObject {
         ticker = nil
     }
 
+    /// Returns the most-restrictive temporary speed limit from any
+    /// incident whose Point is within `radiusMeters` of `coord`, or
+    /// nil when none apply. Digitraffic gives us only the incident's
+    /// centre point — no zone polygon — so we use a fixed radius as
+    /// the "you're inside the roadwork" approximation. 250 m comfort-
+    /// ably covers the typical Finnish roadwork extent on a motorway
+    /// without triggering for events that are just adjacent to the
+    /// driver's road.
+    func tempSpeedLimit(near coord: CLLocationCoordinate2D,
+                        radiusMeters: CLLocationDistance = 250) -> Int? {
+        let here = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+        var best: Int?
+        for inc in incidents {
+            guard let limit = inc.tempSpeedLimit else { continue }
+            let there = CLLocation(latitude: inc.coordinate.latitude,
+                                   longitude: inc.coordinate.longitude)
+            guard here.distance(from: there) <= radiusMeters else { continue }
+            if best == nil || limit < best! { best = limit }
+        }
+        return best
+    }
+
+    /// True when there's any roadwork-category incident within
+    /// `radiusMeters` of `coord`. Used by the road-info panel to
+    /// surface a roadworks sign next to the street name.
+    func isInRoadworkZone(near coord: CLLocationCoordinate2D,
+                         radiusMeters: CLLocationDistance = 250) -> Bool {
+        let here = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
+        return incidents.contains { inc in
+            guard inc.category == .roadworks else { return false }
+            let there = CLLocation(latitude: inc.coordinate.latitude,
+                                   longitude: inc.coordinate.longitude)
+            return here.distance(from: there) <= radiusMeters
+        }
+    }
+
     func refresh() async {
         do {
             var request = URLRequest(url: Self.endpoint)
@@ -201,6 +237,11 @@ private struct DigitrafficTimeAndDuration: Decodable {
 
 private struct DigitrafficAnnouncementFeature: Decodable {
     let name: String?
+    /// Numeric value when the feature carries one — e.g. for
+    /// `Nopeusrajoitus` (speed limit) this is the km/h figure.
+    let quantity: Double?
+    /// Unit string ("km/h", "t", "m", …) accompanying `quantity`.
+    let unit: String?
 }
 
 extension TrafficIncident {
@@ -224,17 +265,73 @@ extension TrafficIncident {
               let title = ann.title, !title.isEmpty
         else { return nil }
 
-        // Category filter: accident OR feature contains a "RoadClosed".
-        let isAccident = (feature.properties.trafficAnnouncementType ?? "")
-            .uppercased() == "ACCIDENT_REPORT"
-        let isClosure = (ann.features ?? []).contains { f in
-            (f.name ?? "").localizedCaseInsensitiveContains("closed")
-                || (f.name ?? "").localizedCaseInsensitiveContains("closure")
-        }
-        guard isAccident || isClosure else { return nil }
+        // Category detection. Digitraffic's `trafficAnnouncementType`
+        // is null/`GENERAL` for ~99 % of FI features, so the real
+        // signal is in `announcements[].features[].name` — which is
+        // localised Finnish text, NOT English. The previous English-
+        // only `.contains("closed")` filter never matched a single
+        // real entry; this rewrite uses the actual wire phrasing.
+        let annType = (feature.properties.trafficAnnouncementType ?? "").uppercased()
+        let featureNames = (ann.features ?? [])
+            .compactMap { $0.name?.lowercased() }
 
-        let category: TrafficIncident.Category = isClosure ? .closure : .accident
-        let severity: TrafficIncident.Severity = isClosure ? .critical : .major
+        func matches(_ needles: [String]) -> Bool {
+            featureNames.contains { name in
+                needles.contains { name.contains($0) }
+            }
+        }
+
+        let isAccident = annType == "ACCIDENT_REPORT"
+            || annType == "PRELIMINARY_ACCIDENT_REPORT"
+            || matches(["onnettomuus", "accident"])
+        // Full-road closure ONLY — both directions impassable. "Tie
+        // on suljettu liikenteeltä" = road is closed. A carriageway
+        // closure ("Ajorata on suljettu") still leaves the other
+        // carriageway open and reads as roadworks below, not a
+        // closure — driver isn't stopped, just slowed and rerouted
+        // onto fewer lanes. Same with "Toinen ajorata on suljettu"
+        // ("the other carriageway is closed") on divided highways.
+        let isClosure = matches([
+            "tie on suljettu",
+            "road closed",
+        ])
+        // Lane closures, alternating traffic, temp signals, detours,
+        // narrowed lanes, carriageway closures — anything that slows
+        // the driver down without actually stopping them. Most
+        // Digitraffic FI events fall here.
+        let isRoadworks = matches([
+            "ajokaista suljettu",          // lane closed
+            "ajorata on suljettu",         // carriageway (one of two) closed
+            "ohjataan vuorotellen",         // alternating one-lane
+            "tilapäinen liikennevalo",      // temp traffic signals
+            "pysäytetään ajoittain",        // traffic occasionally stopped
+            "kaistoja on kavennettu",       // lanes narrowed
+            "kaksisuuntaisena toiselle ajoradalle", // bidirectional on opposite carriageway
+            "käytössä kiertotie",           // detour in use
+            "kiertotieopastus",             // detour signage
+            "roadwork", "construction", "maintenance", "repair",
+        ])
+        guard isAccident || isClosure || isRoadworks else { return nil }
+
+        // Closure trumps roadworks trumps accident for the surfaced
+        // category — a roadwork that closes the road reads as a
+        // closure, an accident only fires when nothing more severe
+        // applies.
+        let category: TrafficIncident.Category
+        let severity: TrafficIncident.Severity
+        if isClosure {
+            category = .closure
+            severity = .critical
+        } else if isAccident {
+            category = .accident
+            severity = .major
+        } else {
+            category = .roadworks
+            // Roadworks default to `.minor` so they show as map pins
+            // but don't trip the severeNearby banner (which fires on
+            // `.major`+).
+            severity = .minor
+        }
 
         // Validity.
         let validFrom = ann.timeAndDuration?.startTime
@@ -246,6 +343,21 @@ extension TrafficIncident {
         // Drop expired.
         guard validTo >= now else { return nil }
 
+        // Temp speed limit — Digitraffic encodes this as a feature
+        // named "Nopeusrajoitus" with `quantity` (km/h) + `unit`
+        // ("km/h"). We expose it on the incident so the Map tab's
+        // speedometer can override the static Digiroad/OSM limit
+        // while the user is inside a roadwork zone.
+        let tempSpeedLimit: Int? = (ann.features ?? [])
+            .first { f in
+                (f.name ?? "").lowercased().contains("nopeusrajoitus")
+            }
+            .flatMap { f -> Int? in
+                guard let q = f.quantity,
+                      (f.unit ?? "km/h").lowercased().contains("km") else { return nil }
+                return Int(q.rounded())
+            }
+
         return TrafficIncident(
             id: UUID(),
             situationId: feature.properties.situationId,
@@ -255,7 +367,8 @@ extension TrafficIncident {
             headline: title,
             detail: ann.comment,
             validFrom: validFrom,
-            validTo: validTo
+            validTo: validTo,
+            tempSpeedLimit: tempSpeedLimit
         )
     }
 }
