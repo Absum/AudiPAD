@@ -1133,14 +1133,14 @@ private struct MapNowPlayingStrip: View {
                         }
                     }
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(np.title)
-                        .font(SQ5Typography.subtitle)
+                        .font(.system(size: 22, weight: .semibold))
                         .foregroundStyle(SQ5Colors.textPrimary)
                         .lineLimit(1)
                     Text(np.artist)
-                        .font(SQ5Typography.caption)
-                        .foregroundStyle(SQ5Colors.textPrimary.opacity(0.75))
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(SQ5Colors.textPrimary.opacity(0.8))
                         .lineLimit(1)
                 }
                 // Shadow keeps the white text readable over light
