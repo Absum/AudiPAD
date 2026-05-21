@@ -2,7 +2,15 @@ import SwiftUI
 import CoreLocation
 
 struct ContentView: View {
-    @State private var selectedTab: AppTab = .home
+    /// Owned by `AudiPadApp` so the URL-scheme deep-link handler can
+    /// flip tabs (e.g. `audipad://map` opens us straight on the map
+    /// from the Charger-Connected Shortcut). Default is supplied for
+    /// previews and any caller that doesn't need external control.
+    @Binding var selectedTab: AppTab
+
+    init(selectedTab: Binding<AppTab> = .constant(.home)) {
+        self._selectedTab = selectedTab
+    }
 
     /// Shared across all tabs so data is consistent + so cross-cutting
     /// features (speed camera monitor, traffic incidents) can subscribe

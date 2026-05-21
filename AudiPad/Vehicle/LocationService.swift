@@ -22,6 +22,27 @@ final class LocationService: NSObject, ObservableObject {
         manager.distanceFilter = kCLDistanceFilterNone
         manager.headingFilter = 1
         manager.activityType = .automotiveNavigation
+        // The car automation that auto-launches us may sit at a red
+        // light or stationary for a while; CoreLocation's default
+        // behaviour is to *pause* updates when it thinks we're not
+        // moving, which kills the speedometer feed. Keep the stream
+        // alive — we want the next fix the second we roll.
+        manager.pausesLocationUpdatesAutomatically = false
+        // Pre-warm: if the user already granted permission on a prior
+        // launch, kick the GPS receiver the moment this object is
+        // instantiated — well before any view's onAppear runs. The
+        // first cold fix takes 5–15 s on iPad GPS hardware; starting
+        // it in init() instead of in a view's onAppear shaves whatever
+        // delay there is between app launch and first view mount,
+        // which on the car-mounted iPad is the difference between
+        // "speedometer is live when you look down" and "it's catching
+        // up while you drive off".
+        if isAuthorized {
+            manager.startUpdatingLocation()
+            if CLLocationManager.headingAvailable() {
+                manager.startUpdatingHeading()
+            }
+        }
     }
 
     /// Ask for "When In Use" permission. Safe to call repeatedly — the system
