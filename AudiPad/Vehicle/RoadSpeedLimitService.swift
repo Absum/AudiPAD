@@ -118,6 +118,17 @@ final class RoadSpeedLimitService: ObservableObject {
     private var lastDigiroadQueriedCoord: CLLocationCoordinate2D?
     private var locationProvider: () -> CLLocation? = { nil }
 
+    /// Disk-cache for Digiroad WFS responses. Bbox → segments mapping
+    /// with a 30-day TTL. Lets a previously-driven area hit zero
+    /// network for speed-limit data.
+    private let digiroadCache = DigiroadCache()
+
+    /// Grid we snap the user's coord to before computing the
+    /// around-user bbox. ~2km lat × ~1.1km lon at 60°N — neighbouring
+    /// fixes within the same cell yield an identical bbox, so the
+    /// cache key is stable until the user crosses a cell boundary.
+    private static let userBBoxSnapGridDeg: Double = 0.02
+
     init() {
         loadCache()
     }
@@ -283,10 +294,26 @@ final class RoadSpeedLimitService: ObservableObject {
     private func fetchDigiroad(around loc: CLLocation) async {
         let coord = loc.coordinate
         let course: Double? = loc.course >= 0 ? loc.course : nil
-        let minLon = coord.longitude - Self.digiroadBBoxHalfLonDeg
-        let minLat = coord.latitude  - Self.digiroadBBoxHalfLatDeg
-        let maxLon = coord.longitude + Self.digiroadBBoxHalfLonDeg
-        let maxLat = coord.latitude  + Self.digiroadBBoxHalfLatDeg
+        // Snap the bbox center to the grid so neighbouring fixes
+        // within the same cell produce the same cache key. Worst-case
+        // user offset from snapped center is half a cell (~1.1 km),
+        // well within the 4 km bbox.
+        let snapLat = (coord.latitude  / Self.userBBoxSnapGridDeg).rounded() * Self.userBBoxSnapGridDeg
+        let snapLon = (coord.longitude / Self.userBBoxSnapGridDeg).rounded() * Self.userBBoxSnapGridDeg
+        let minLon = snapLon - Self.digiroadBBoxHalfLonDeg
+        let minLat = snapLat - Self.digiroadBBoxHalfLatDeg
+        let maxLon = snapLon + Self.digiroadBBoxHalfLonDeg
+        let maxLat = snapLat + Self.digiroadBBoxHalfLatDeg
+
+        // Disk-cache lookup first — most steady-state driving lands
+        // here and skips the WFS round-trip entirely.
+        let key = DigiroadCache.key(minLon: minLon, minLat: minLat,
+                                    maxLon: maxLon, maxLat: maxLat)
+        if let cached = digiroadCache.load(key: key) {
+            applyDigiroadResponse(cached, around: coord, course: course)
+            lastDigiroadQueriedCoord = coord
+            return
+        }
 
         guard var components = URLComponents(url: Self.digiroadEndpoint, resolvingAgainstBaseURL: false) else { return }
         components.queryItems = [
@@ -319,64 +346,77 @@ final class RoadSpeedLimitService: ObservableObject {
 
             let payload = try JSONDecoder().decode(DigiroadResponse.self, from: data)
             lastDigiroadQueriedCoord = coord
-
-            // Cache every usable segment (geometry + link_id) so the
-            // same-road snapper can resolve arbitrary coords later
-            // without a re-fetch. We write to the user-area source and
-            // then rebuild the merged `digiroadSegments` view (which
-            // also folds in any active-route corridor).
-            userAreaSegments = payload.features.compactMap { feature -> DigiroadCachedSegment? in
-                guard let linkId = feature.properties.linkId,
-                      let coords = feature.geometry?.coordinates,
-                      !coords.isEmpty
-                else { return nil }
-                let vertices: [CLLocationCoordinate2D] = coords.compactMap {
-                    guard $0.count >= 2 else { return nil }
-                    return CLLocationCoordinate2D(latitude: $0[1], longitude: $0[0])
-                }
-                guard !vertices.isEmpty else { return nil }
-                return DigiroadCachedSegment(linkId: linkId,
-                                             limit: feature.properties.arvo,
-                                             vertices: vertices)
-            }
-            rebuildSegments()
-
-            // Pick the segment whose nearest *edge* sits closest to the
-            // user, course-aligned when course is valid. Segments with no
-            // or out-of-range limit don't qualify (we want a usable limit).
-            // Read from the merged view rather than userAreaSegments
-            // alone: `bestEdgeMatch` already enforces 35 m proximity +
-            // course alignment, so far-away route-corridor segments are
-            // naturally excluded — and a transient empty user-area
-            // payload (over water, brief HTTP failure) can still
-            // produce a Reading from the route corridor.
-            let candidates = digiroadSegments.filter { seg in
-                guard let limit = seg.limit else { return false }
-                return (10...130).contains(limit)
-            }
-            let matched = Self.bestEdgeMatch(candidates,
-                                             vertices: { $0.vertices },
-                                             at: coord, course: course,
-                                             maxDistance: 35,
-                                             courseTolerance: 35)
-
-            guard let n = matched, let limit = n.limit else {
-                digiroadReading = nil
-                lastError = nil
-                updateCurrent()
-                return
-            }
-
-            digiroadReading = Reading(limit: limit,
-                                      source: .tierekisteri,
-                                      appliedSeasonalAdjustment: false,
-                                      timestamp: Date())
-            lastError = nil
-            updateCurrent()
+            let segments = Self.parseSegments(from: payload)
+            digiroadCache.store(segments, key: key)
+            applyDigiroadResponse(segments, around: coord, course: course)
         } catch let decoding as DecodingError {
             lastError = "Digiroad decode: \(decoding.localizedDescription)"
         } catch {
             lastError = "Digiroad network: \(error.localizedDescription)"
+        }
+    }
+
+    /// Apply a freshly-parsed (or cached) batch of Digiroad segments
+    /// to the in-memory user-area cache, rebuild the merged view, and
+    /// recompute the user's current speed-limit Reading. Shared by
+    /// the network and cache-hit paths so they behave identically.
+    private func applyDigiroadResponse(_ segments: [DigiroadCachedSegment],
+                                       around coord: CLLocationCoordinate2D,
+                                       course: Double?) {
+        userAreaSegments = segments
+        rebuildSegments()
+
+        // Pick the segment whose nearest *edge* sits closest to the
+        // user, course-aligned when course is valid. Segments with no
+        // or out-of-range limit don't qualify (we want a usable limit).
+        // Read from the merged view rather than userAreaSegments
+        // alone: `bestEdgeMatch` already enforces 35 m proximity +
+        // course alignment, so far-away route-corridor segments are
+        // naturally excluded — and a transient empty user-area
+        // payload (over water, brief HTTP failure) can still
+        // produce a Reading from the route corridor.
+        let candidates = digiroadSegments.filter { seg in
+            guard let limit = seg.limit else { return false }
+            return (10...130).contains(limit)
+        }
+        let matched = Self.bestEdgeMatch(candidates,
+                                         vertices: { $0.vertices },
+                                         at: coord, course: course,
+                                         maxDistance: 35,
+                                         courseTolerance: 35)
+
+        guard let n = matched, let limit = n.limit else {
+            digiroadReading = nil
+            lastError = nil
+            updateCurrent()
+            return
+        }
+
+        digiroadReading = Reading(limit: limit,
+                                  source: .tierekisteri,
+                                  appliedSeasonalAdjustment: false,
+                                  timestamp: Date())
+        lastError = nil
+        updateCurrent()
+    }
+
+    /// Pure parser — turns a decoded WFS response into our internal
+    /// segment shape. Reused by both fetch paths and (in principle)
+    /// any unit tests we add later.
+    private static func parseSegments(from payload: DigiroadResponse) -> [DigiroadCachedSegment] {
+        payload.features.compactMap { feature -> DigiroadCachedSegment? in
+            guard let linkId = feature.properties.linkId,
+                  let coords = feature.geometry?.coordinates,
+                  !coords.isEmpty
+            else { return nil }
+            let vertices: [CLLocationCoordinate2D] = coords.compactMap {
+                guard $0.count >= 2 else { return nil }
+                return CLLocationCoordinate2D(latitude: $0[1], longitude: $0[0])
+            }
+            guard !vertices.isEmpty else { return nil }
+            return DigiroadCachedSegment(linkId: linkId,
+                                         limit: feature.properties.arvo,
+                                         vertices: vertices)
         }
     }
 
@@ -492,7 +532,18 @@ final class RoadSpeedLimitService: ObservableObject {
     /// corridor tile. Throws on any failure (network, non-2xx HTTP,
     /// decode error) so the caller can choose to abort the whole
     /// corridor rather than commit a partial one.
+    ///
+    /// Disk-cache aware: the bbox is keyed (with edges snapped to the
+    /// same grid used by `fetchDigiroad`'s around-user path), so a
+    /// corridor tile that's already in cache from a previous drive —
+    /// or from an around-user fetch over the same area — is returned
+    /// without a WFS request.
     private func fetchDigiroadTile(bbox: BBox) async throws -> [DigiroadCachedSegment] {
+        let key = DigiroadCache.key(minLon: bbox.minLon, minLat: bbox.minLat,
+                                    maxLon: bbox.maxLon, maxLat: bbox.maxLat)
+        if let cached = digiroadCache.load(key: key) {
+            return cached
+        }
         guard var components = URLComponents(url: Self.digiroadEndpoint, resolvingAgainstBaseURL: false) else {
             throw URLError(.badURL)
         }
@@ -518,20 +569,9 @@ final class RoadSpeedLimitService: ObservableObject {
             throw URLError(.badServerResponse)
         }
         let payload = try JSONDecoder().decode(DigiroadResponse.self, from: data)
-        return payload.features.compactMap { feature -> DigiroadCachedSegment? in
-            guard let linkId = feature.properties.linkId,
-                  let coords = feature.geometry?.coordinates,
-                  !coords.isEmpty
-            else { return nil }
-            let vertices: [CLLocationCoordinate2D] = coords.compactMap {
-                guard $0.count >= 2 else { return nil }
-                return CLLocationCoordinate2D(latitude: $0[1], longitude: $0[0])
-            }
-            guard !vertices.isEmpty else { return nil }
-            return DigiroadCachedSegment(linkId: linkId,
-                                         limit: feature.properties.arvo,
-                                         vertices: vertices)
-        }
+        let segments = Self.parseSegments(from: payload)
+        digiroadCache.store(segments, key: key)
+        return segments
     }
 
     /// Walk the polyline and chop it into bbox tiles, each no larger
@@ -1156,8 +1196,10 @@ private struct DigiroadProperties: Decodable {
 }
 
 /// Lightweight cache of a single Digiroad segment, kept around in
-/// `RoadSpeedLimitService` for the same-road snapper to read.
-private struct DigiroadCachedSegment {
+/// `RoadSpeedLimitService` for the same-road snapper to read. Also
+/// the shape `DigiroadCache` reads + writes from disk — `internal`
+/// access (rather than `private`) so the cache can construct them.
+struct DigiroadCachedSegment {
     let linkId: String
     let limit: Int?
     let vertices: [CLLocationCoordinate2D]
