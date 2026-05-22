@@ -32,6 +32,20 @@ final class SpeedCameraService: ObservableObject {
     private var lastFetchedCenter: CLLocationCoordinate2D?
     private var userCenterProvider: () -> CLLocationCoordinate2D? = { nil }
 
+    /// Disk cache for Overpass responses, keyed by snapped bbox. The
+    /// existing UserDefaults cache below is kept for cold-start
+    /// "show the most recently fetched cameras"; this disk cache
+    /// supplements it with per-bbox memory so driving between cities
+    /// doesn't nuke the historical entries.
+    private let diskCache = OSMCameraCache()
+
+    /// Coarse grid the user's coord snaps to before the bbox is
+    /// computed in `refresh`. 0.05° (~5.5 km lat × ~2.75 km lon at
+    /// 60°N) means small drifts produce the same bbox + cache key.
+    /// Even at the upper end of the cell, the 0.45° (~50 km) half-
+    /// width bbox covers the user with massive margin.
+    private static let userBBoxSnapGridDeg: Double = 0.05
+
     init() {
         loadCache()
     }
@@ -62,13 +76,34 @@ final class SpeedCameraService: ObservableObject {
     }
 
     func refresh(around center: CLLocationCoordinate2D) async {
+        // Snap the center to the grid so neighbouring fixes produce
+        // the same bbox + cache key — without this, every fetch
+        // generates a unique bbox and the disk cache never gets a hit.
+        let snapLat = (center.latitude  / Self.userBBoxSnapGridDeg).rounded() * Self.userBBoxSnapGridDeg
+        let snapLon = (center.longitude / Self.userBBoxSnapGridDeg).rounded() * Self.userBBoxSnapGridDeg
+
         // Bounding box scaled by latitude so the east/west extent is similar
         // in real meters regardless of where in Finland the user is.
-        let lonHalfDegrees = latHalfDegrees / max(cos(center.latitude * .pi / 180), 0.1)
-        let south = center.latitude - latHalfDegrees
-        let north = center.latitude + latHalfDegrees
-        let west = center.longitude - lonHalfDegrees
-        let east = center.longitude + lonHalfDegrees
+        let lonHalfDegrees = latHalfDegrees / max(cos(snapLat * .pi / 180), 0.1)
+        let south = snapLat - latHalfDegrees
+        let north = snapLat + latHalfDegrees
+        let west = snapLon - lonHalfDegrees
+        let east = snapLon + lonHalfDegrees
+
+        // Disk-cache lookup — most repeat visits to a familiar
+        // metropolitan area land here and skip Overpass entirely.
+        let cacheKey = OSMCameraCache.key(minLon: west, minLat: south,
+                                          maxLon: east, maxLat: north)
+        if let cached = diskCache.load(key: cacheKey), !cached.isEmpty {
+            cameras = cached
+            lastUpdated = Date()
+            lastFetchedCenter = center
+            lastError = nil
+            // Refresh the most-recent UserDefaults entry too so the
+            // next cold-start lands on this set.
+            saveCache(cached)
+            return
+        }
 
         let query = """
         [out:json][timeout:25];
@@ -103,6 +138,7 @@ final class SpeedCameraService: ObservableObject {
                 lastFetchedCenter = center
                 lastError = nil
                 saveCache(parsed)
+                diskCache.store(parsed, key: cacheKey)
             }
         } catch {
             lastError = error.localizedDescription
