@@ -63,6 +63,23 @@ final class SpotifyService: ObservableObject {
     /// re-fetching the same image on every 3-second poll.
     private var lastArtworkTrackID: String?
 
+    init() {
+        // Auto-resume on every launch when we have a stored refresh
+        // token. The user signed in once via PKCE and the refresh
+        // token doesn't expire (barring revoke), so making them tap
+        // Connect every session is just noise — silently mint a fresh
+        // access token and start polling. If the refresh fails (rare:
+        // network out, or the user revoked AudiPad), `connect()`
+        // surfaces an error and the Connect button reappears.
+        if auth.hasStoredCredentials {
+            // Optimistic flag so the Connect button doesn't flash for
+            // ~500 ms before the first poll lands. If the refresh
+            // fails the connect() flow flips this back to false.
+            isConnected = true
+            connect()
+        }
+    }
+
     // MARK: - Public API
 
     /// Single-tap connect. Three paths:
