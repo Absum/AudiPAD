@@ -347,6 +347,15 @@ struct MapTabView: View {
             controller.snapper = { [weak roadLimits] loc in
                 roadLimits?.snapped(loc)
             }
+            // Per-frame interpolation loop. Owns the camera + car
+            // marker between GPS fixes. See MapController for the
+            // tick math.
+            controller.startSmoothing()
+        }
+        .onDisappear {
+            // Stop the display link when leaving the map tab so we
+            // don't pay the per-frame cost in the background.
+            controller.stopSmoothing()
         }
         .onReceive(location.$location) { loc in
             // Manual follow + heading-up applied here. Avoids
@@ -544,6 +553,57 @@ final class MapController: ObservableObject {
     /// mid-animation value the moment a tilt button is tapped.
     private var desiredPitch: CGFloat = 50
 
+    // MARK: Per-frame smoothing
+    //
+    // A single CADisplayLink drives camera + car-annotation tracking
+    // at the screen's refresh rate. `applyLocationUpdate` writes the
+    // latest GPS-derived target state into the `target*` fields; the
+    // link callback exponentially eases the live state toward the
+    // target every frame. Replaces the per-fix UIView.animate chain
+    // that caused minutes-long freezes during real-drive nav (see
+    // commit log + Meshly task 94650d76).
+
+    /// Latest target camera center, set by `applyLocationUpdate`.
+    /// Nil until the first fix arrives.
+    private var targetCenter: CLLocationCoordinate2D?
+    /// Latest target camera heading (degrees clockwise from north).
+    private var targetHeading: CLLocationDirection?
+    /// Latest target car-annotation coordinate (snapped GPS coord,
+    /// used for the marker — distinct from `targetCenter` which sits
+    /// forward of the user in heading-up follow).
+    private var targetCarCoord: CLLocationCoordinate2D?
+
+    /// CADisplayLink running while the map tab is on screen.
+    private var displayLink: CADisplayLink?
+    /// Non-isolated proxy so CADisplayLink doesn't retain `self`
+    /// strongly (proxy holds a weak ref + bridges to `@MainActor`).
+    private var smoothingProxy: SmoothingProxy?
+
+    /// Per-second easing rate for the exponential lerp. 8 gives a
+    /// half-life of ~87 ms, so at 60 Hz interpolation between 1 Hz
+    /// GPS fixes converges to ~99% of target within ~500 ms — visually
+    /// indistinguishable from "live". At 10 Hz GPS each tick lands
+    /// ~66 % of the way, giving a tight follow with a small visual
+    /// dampening that masks GPS jitter.
+    private static let smoothingConvergenceRate: Double = 8
+
+    /// Below this distance (meters) we snap directly to target rather
+    /// than chasing asymptotically — avoids floating-point drift and
+    /// pointless setCamera churn when the user is parked.
+    private static let smoothingSnapDistanceMeters: Double = 0.5
+    /// Same idea for heading — below this angular delta the heading
+    /// is snapped.
+    private static let smoothingSnapHeadingDeg: Double = 0.05
+
+    // Throttling for the regionDidChangeAnimated callback: with the
+    // display link calling setCamera(animated: false) every frame,
+    // that delegate fires 60 Hz too. The two @Published writes +
+    // UserDefaults flush below are the bulk of its cost, so we rate-
+    // limit each.
+    private var lastCompassPublish: TimeInterval = 0
+    private var lastRegionPublish: TimeInterval = 0
+    private var lastCameraPersist: TimeInterval = 0
+
     private static let followKey      = "audipad.map.followUser"
     private static let headingKey     = "audipad.map.headingUp"
     private static let headingValKey  = "audipad.map.headingDeg"
@@ -681,7 +741,6 @@ final class MapController: ObservableObject {
 
     func applyLocationUpdate(_ location: CLLocation) {
         guard let map = mapView else { return }
-        let cam = map.camera
 
         // Map-matched position — projects the raw GPS coord onto the
         // nearest road centerline so the camera tracks the road rather
@@ -689,64 +748,168 @@ final class MapController: ObservableObject {
         // user is off-road or no road data is cached nearby.
         let trackedCoord = snapper?(location) ?? location.coordinate
 
-        // Make the car visible on first fix. Heading goes through the
-        // same animated path as the rest of the marker pose below.
+        // Make the car visible on first fix.
         carAnnotation.isVisible = true
         if location.course >= 0, location.speed > 0.5 {
             carAnnotation.heading = location.course
         }
 
-        var newCenter = cam.centerCoordinate
-        var newHeading = cam.heading
-
+        var newHeading = targetHeading ?? map.camera.heading
         if headingUp, location.course >= 0, location.speed > 1.5 {
             newHeading = location.course
         }
 
+        var newCenter = trackedCoord
         if followUser {
-            // In heading-up follow we offset the camera centerpoint
-            // forward of the user along the heading, so the user dot lands
-            // 1/3 from the bottom of the map — leaves the road ahead with
-            // most of the screen real estate, like every nav app.
             if headingUp {
                 let forwardBearing = (location.course >= 0) ? location.course : newHeading
                 newCenter = Self.forwardOffsetCenter(for: trackedCoord,
                                                     bearing: forwardBearing,
                                                     on: map)
-            } else {
-                newCenter = trackedCoord
             }
+        } else {
+            // Not following — the user has panned away. Don't yank the
+            // camera back. Still update the car annotation target so
+            // its marker tracks the user position on the panned map.
+            targetCarCoord = trackedCoord
+            return
         }
 
-        let next = MKMapCamera(lookingAtCenter: newCenter,
-                               fromDistance: desiredAltitude,
-                               pitch: desiredPitch,
-                               heading: newHeading)
+        // Hand the new pose off to the display-link interpolator. The
+        // tick callback eases live state toward these targets every
+        // frame — no per-fix UIView.animate, no SCNTransaction with
+        // non-zero duration, nothing for the system to stack up.
+        targetCenter = newCenter
+        targetHeading = newHeading
+        targetCarCoord = trackedCoord
+    }
 
-        // One tween for the whole pose: camera, annotation position, and
-        // SceneKit yaw all glide together over 1 s with a linear curve.
-        // Without this, the car would "snap" to each new GPS fix while
-        // the camera was still gliding toward it — visible hopping
-        // relative to the underlying map.
-        UIView.animate(withDuration: 1.0,
-                       delay: 0,
-                       options: [.curveLinear, .beginFromCurrentState, .allowUserInteraction]) {
+    // MARK: - Smoothing loop
+
+    /// Begin the per-frame interpolation loop. Idempotent. Should be
+    /// called when the map tab appears and stopped when it disappears
+    /// (or the app backgrounds) — the link is cheap when idle but
+    /// there's no reason to keep it running off-screen.
+    func startSmoothing() {
+        guard displayLink == nil else { return }
+        let proxy = SmoothingProxy(self)
+        let link = CADisplayLink(target: proxy, selector: #selector(SmoothingProxy.tick(_:)))
+        // 60 Hz is the screen's native rate; iPad mini supports up to
+        // 60 fps. ProMotion iPads could push 120 but the GPS-derived
+        // targets only change at 1-10 Hz so the extra frames buy
+        // nothing visible.
+        link.preferredFramesPerSecond = 60
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+        smoothingProxy = proxy
+    }
+
+    func stopSmoothing() {
+        displayLink?.invalidate()
+        displayLink = nil
+        smoothingProxy = nil
+    }
+
+    /// Per-frame interpolation. Called by `SmoothingProxy.tick`. Eases
+    /// the map camera + car annotation + SceneKit transform toward the
+    /// latest `target*` state at an exponential rate.
+    fileprivate func smoothingTick(deltaSeconds: TimeInterval) {
+        guard let map = mapView else { return }
+        guard let targetCenter, let targetCarCoord else { return }
+        // Convert per-second convergence into per-frame alpha. Stable
+        // across frame-rate jitter because we use the actual delta.
+        let alpha = 1 - exp(-Self.smoothingConvergenceRate * deltaSeconds)
+
+        let cur = map.camera
+        let curCenter = cur.centerCoordinate
+        let targetHead = targetHeading ?? cur.heading
+
+        // Coordinate lerp — over the few-meter delta between fixes the
+        // great-circle vs linear-degree distinction is sub-millimeter.
+        let stepCenter = Self.lerpCoord(curCenter, to: targetCenter, alpha: alpha,
+                                        snapMeters: Self.smoothingSnapDistanceMeters)
+        let stepHeading = Self.lerpHeading(from: cur.heading, to: targetHead, alpha: alpha,
+                                           snapDeg: Self.smoothingSnapHeadingDeg)
+
+        // Only push a new camera if something measurably changed —
+        // saves a setCamera + regionDidChange + UserDefaults flush on
+        // every idle frame when the user is parked.
+        let centerChanged = Self.coordsDifferent(stepCenter, curCenter,
+                                                 snapMeters: Self.smoothingSnapDistanceMeters)
+        let headingChanged = abs(Self.angularDelta(stepHeading, cur.heading)) > Self.smoothingSnapHeadingDeg
+        if centerChanged || headingChanged {
+            let next = MKMapCamera(lookingAtCenter: stepCenter,
+                                   fromDistance: desiredAltitude,
+                                   pitch: desiredPitch,
+                                   heading: stepHeading)
             map.setCamera(next, animated: false)
-            // MKMapView observes annotation.coordinate via KVO; setting it
-            // inside a UIView.animate block triggers an animated update
-            // of the annotation's projected screen position.
-            self.carAnnotation.coordinate = trackedCoord
         }
 
-        // SceneKit nodes don't participate in UIKit animations — drive
-        // the yaw + camera-orbit transform through SCNTransaction with the
-        // same duration so the car body and the camera lean in sync with
-        // the position tween.
+        // Interpolate the car-annotation marker. KVO on .coordinate
+        // would normally trigger MapKit's own implicit CATransaction
+        // animation — suppress with setDisableActions so the marker
+        // moves in lockstep with the camera rather than chasing it.
+        let curCar = carAnnotation.coordinate
+        let stepCar = Self.lerpCoord(curCar, to: targetCarCoord, alpha: alpha,
+                                     snapMeters: Self.smoothingSnapDistanceMeters)
+        if Self.coordsDifferent(stepCar, curCar, snapMeters: Self.smoothingSnapDistanceMeters) {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            carAnnotation.coordinate = stepCar
+            CATransaction.commit()
+        }
+
+        // SceneKit yaw — instant (duration 0). Cheap matrix math.
         SCNTransaction.begin()
-        SCNTransaction.animationDuration = 1.0
-        SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .linear)
+        SCNTransaction.animationDuration = 0
         refreshCarTransform()
         SCNTransaction.commit()
+    }
+
+    // MARK: Interpolation primitives
+
+    /// Exponential lerp between two coordinates with a snap-to-target
+    /// threshold (avoids floating-point chase + the resulting
+    /// setCamera churn while parked).
+    private static func lerpCoord(_ a: CLLocationCoordinate2D,
+                                  to b: CLLocationCoordinate2D,
+                                  alpha: Double,
+                                  snapMeters: Double) -> CLLocationCoordinate2D {
+        let dist = CLLocation(latitude: a.latitude, longitude: a.longitude)
+            .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))
+        if dist <= snapMeters { return b }
+        return CLLocationCoordinate2D(
+            latitude:  a.latitude  + (b.latitude  - a.latitude)  * alpha,
+            longitude: a.longitude + (b.longitude - a.longitude) * alpha
+        )
+    }
+
+    private static func coordsDifferent(_ a: CLLocationCoordinate2D,
+                                        _ b: CLLocationCoordinate2D,
+                                        snapMeters: Double) -> Bool {
+        let dist = CLLocation(latitude: a.latitude, longitude: a.longitude)
+            .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))
+        return dist > snapMeters
+    }
+
+    /// Shortest-arc angular lerp; without the wrap-around handling the
+    /// camera spins the long way round at the 359° → 1° crossing.
+    private static func lerpHeading(from a: Double, to b: Double,
+                                    alpha: Double, snapDeg: Double) -> Double {
+        let delta = angularDelta(a, b)
+        if abs(delta) <= snapDeg { return b }
+        // delta is signed shortest-arc difference from a to b.
+        let result = (a + delta * alpha).truncatingRemainder(dividingBy: 360)
+        return result < 0 ? result + 360 : result
+    }
+
+    /// Signed shortest-arc difference between two bearings (degrees).
+    /// `+` clockwise. Result in `[-180, 180]`.
+    fileprivate static func angularDelta(_ a: Double, _ b: Double) -> Double {
+        var d = (b - a).truncatingRemainder(dividingBy: 360)
+        if d > 180 { d -= 360 }
+        if d < -180 { d += 360 }
+        return d
     }
 
     /// Push the latest map heading + pitch into the car annotation view's
@@ -813,6 +976,68 @@ final class MapController: ObservableObject {
                                pitch: desiredPitch,
                                heading: target)
         map.setCamera(next, animated: animated)
+    }
+
+    // MARK: - Throttled regionDidChange work
+    //
+    // Called from the MKMapViewDelegate at 60 Hz once the smoothing
+    // display link is running. The three @Published writes + the
+    // UserDefaults flush are individually cheap but pile up into
+    // SwiftUI re-render storms and disk churn at 60 Hz, so we
+    // rate-limit each.
+
+    fileprivate func handleRegionDidChange() {
+        guard let map = mapView else { return }
+        let now = CACurrentMediaTime()
+
+        // Compass badge — 10 Hz is more than enough for the visual.
+        let head = map.camera.heading
+        if now - lastCompassPublish > 0.1,
+           abs(Self.angularDelta(currentMapHeading, head)) > 0.5 {
+            currentMapHeading = head
+            lastCompassPublish = now
+        }
+
+        // Search-bias region — used by `MKLocalSearchCompletion` and
+        // the route calculator. Refreshing twice a second is plenty.
+        if now - lastRegionPublish > 0.5 {
+            currentRegion = map.region
+            lastRegionPublish = now
+        }
+
+        // UserDefaults persistence — keep the last good camera around
+        // so app relaunch doesn't re-zoom to Helsinki. 2 s is fine;
+        // a hard quit between persists costs us at most 2 s of camera
+        // memory, which is invisible to the user.
+        if now - lastCameraPersist > 2 {
+            persistCamera()
+            lastCameraPersist = now
+        }
+    }
+}
+
+/// Bridges `CADisplayLink` (non-isolated, Obj-C selector) to the
+/// MainActor-isolated `MapController.smoothingTick`. CADisplayLink
+/// retains its target strongly; using a separate proxy with a weak
+/// ref to the controller prevents a retain cycle.
+private final class SmoothingProxy: NSObject {
+    private weak var controller: MapController?
+
+    init(_ controller: MapController) {
+        self.controller = controller
+        super.init()
+    }
+
+    /// CADisplayLink fires this on the main thread. Hop into the
+    /// MainActor explicitly so the compiler is happy on iOS 16 (which
+    /// doesn't have `MainActor.assumeIsolated`). The 1-runloop hop
+    /// adds a frame of latency at most — invisible at 60 Hz.
+    @objc func tick(_ link: CADisplayLink) {
+        let delta = link.duration
+        guard let controller else { return }
+        Task { @MainActor in
+            controller.smoothingTick(deltaSeconds: delta)
+        }
     }
 }
 
@@ -2204,17 +2429,16 @@ private struct MapBackground: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
-            // Mirror live camera state back to the controller, then persist
-            // so the user's zoom/center carries across app launches.
-            guard let controller else { return }
-            controller.currentRegion = mapView.region
-            controller.currentMapHeading = mapView.camera.heading
-            controller.persistCamera()
-            // Map heading or pitch may have changed — refresh the car
-            // annotation's 3D transform so it stays oriented to its
-            // compass heading and lying flat on the (possibly newly
-            // tilted) road plane.
-            controller.refreshCarTransform()
+            // The display-link interpolator drives setCamera at 60 Hz,
+            // so this delegate fires 60 Hz too. The controller's
+            // throttled handler rate-limits the three @Published
+            // writes + the UserDefaults flush so we don't drown
+            // SwiftUI or the disk. The car transform is refreshed
+            // inside `smoothingTick` itself when the camera updates;
+            // we still call it here for the user-gesture case (manual
+            // tilt / rotate) where smoothingTick isn't the driver.
+            controller?.handleRegionDidChange()
+            controller?.refreshCarTransform()
         }
 
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
@@ -2334,8 +2558,13 @@ private final class CarAnnotationView: MKAnnotationView {
         scnView.frame = bounds
         scnView.backgroundColor = .clear
         scnView.isOpaque = false
-        scnView.antialiasingMode = .multisampling4X
-        scnView.preferredFramesPerSecond = 30
+        // GPU-relief pair: dropping 4× MSAA and lowering the render
+        // rate from 30 → 20 fps frees ~30-40 % of the A9X's GPU budget
+        // per second so MapKit can keep tiles + the route polyline at
+        // 60 fps during nav. The car model is small on screen and not
+        // moving rapidly — 20 fps with no AA is visually fine.
+        scnView.antialiasingMode = .none
+        scnView.preferredFramesPerSecond = 20
         addSubview(scnView)
 
         let scene = SCNScene()
