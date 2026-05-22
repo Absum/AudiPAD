@@ -123,6 +123,14 @@ final class RoadSpeedLimitService: ObservableObject {
     /// network for speed-limit data.
     private let digiroadCache = DigiroadCache()
 
+    /// In-memory LRU for reverse-geocoded road names. Keyed by coord
+    /// rounded to ~10 m precision. CLGeocoder is rate-limited and
+    /// caching identical lookups collapses idling-at-junction GPS
+    /// jitter (where the user oscillates around a single point) to a
+    /// single network round-trip. Capped at 256 entries — covers a
+    /// solid afternoon of driving before evictions start.
+    private let roadNameCache = RoadNameLRU(maxCount: 256)
+
     /// Grid we snap the user's coord to before computing the
     /// around-user bbox. ~2km lat × ~1.1km lon at 60°N — neighbouring
     /// fixes within the same cell yield an identical bbox, so the
@@ -661,13 +669,26 @@ final class RoadSpeedLimitService: ObservableObject {
     }
 
     private func fetchAppleRoadName(at coord: CLLocationCoordinate2D) async {
+        // In-memory cache lookup first — most jitter while idling at a
+        // junction (GPS oscillating around a single point) lands on
+        // the same key and skips the round-trip entirely.
+        let key = Self.roadNameKey(for: coord)
+        if let cached = roadNameCache.get(key) {
+            appleRoadName = cached
+            lastGeocodedCoord = coord
+            rebuildRoadInfo()
+            return
+        }
+
         let loc = CLLocation(latitude: coord.latitude, longitude: coord.longitude)
         do {
             let placemarks = try await geocoder.reverseGeocodeLocation(loc)
             // `thoroughfare` is the street name (e.g. "Mannerheimintie").
             // Apple doesn't expose road numbers (E18, Vt 7) so we leave
             // ref to OSM.
-            appleRoadName = placemarks.first?.thoroughfare
+            let name = placemarks.first?.thoroughfare
+            appleRoadName = name
+            if let name { roadNameCache.set(key, name) }
             lastGeocodedCoord = coord
             rebuildRoadInfo()
         } catch {
@@ -675,6 +696,15 @@ final class RoadSpeedLimitService: ObservableObject {
             // off-grid coord. Don't clobber the previous name — the
             // panel keeps showing what it last knew.
         }
+    }
+
+    /// Coord → LRU key. 4 decimal places ≈ 11 m at 60°N — fine enough
+    /// to distinguish neighbouring roads, coarse enough to collapse
+    /// stationary GPS jitter.
+    private static func roadNameKey(for coord: CLLocationCoordinate2D) -> String {
+        let lat = (coord.latitude  * 10_000).rounded() / 10_000
+        let lon = (coord.longitude * 10_000).rounded() / 10_000
+        return "\(lat),\(lon)"
     }
 
     /// Recompute the published `currentRoad` from whichever per-source
@@ -1203,4 +1233,39 @@ struct DigiroadCachedSegment {
     let linkId: String
     let limit: Int?
     let vertices: [CLLocationCoordinate2D]
+}
+
+/// Tiny LRU used by the Apple reverse-geocode path. `get` is
+/// non-mutating from the caller's perspective; access-time bookkeeping
+/// happens behind a class reference so the surrounding service code
+/// stays simple.
+@MainActor
+private final class RoadNameLRU {
+    private var entries: [String: String] = [:]
+    private var order: [String] = []   // oldest first
+    let maxCount: Int
+
+    init(maxCount: Int) { self.maxCount = maxCount }
+
+    func get(_ key: String) -> String? {
+        guard let value = entries[key] else { return nil }
+        // Promote to most-recently-used.
+        if let idx = order.firstIndex(of: key) {
+            order.remove(at: idx)
+            order.append(key)
+        }
+        return value
+    }
+
+    func set(_ key: String, _ value: String) {
+        if entries[key] != nil {
+            order.removeAll { $0 == key }
+        }
+        entries[key] = value
+        order.append(key)
+        while order.count > maxCount {
+            let evict = order.removeFirst()
+            entries.removeValue(forKey: evict)
+        }
+    }
 }
