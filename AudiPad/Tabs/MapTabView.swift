@@ -52,6 +52,13 @@ struct MapTabView: View {
                 cameras: cameraService.cameras
             )
             .ignoresSafeArea()
+            // Stadia attribution — required by Stadia + OpenMapTiles +
+            // OpenStreetMap when their tiles are on screen. Hidden in
+            // Apple-Maps mode so Apple's own attribution isn't
+            // duplicated.
+            .overlay(alignment: .bottomTrailing) {
+                StadiaAttributionLabel()
+            }
 
             // Top gradient
             LinearGradient(
@@ -2311,6 +2318,23 @@ private struct MapBackground: UIViewRepresentable {
     let incidents: [TrafficIncident]
     let cameras: [SpeedCamera]
 
+    /// Basemap selection — Apple Maps default, Stadia opt-in.
+    /// Read from @AppStorage so flipping it in Settings triggers
+    /// `updateUIView` to swap the overlay.
+    @AppStorage(MapBasemap.Defaults.basemapKey)
+    private var basemapRaw: String = MapBasemap.Defaults.defaultBasemap.rawValue
+
+    @AppStorage(MapBasemap.Defaults.stadiaKeyKey)
+    private var stadiaApiKey: String = ""
+
+    private var activeBasemap: MapBasemap {
+        // Fall back to Apple if Stadia is selected but no key is
+        // configured — keeps the map alive instead of going blank.
+        guard let chosen = MapBasemap(rawValue: basemapRaw) else { return .apple }
+        if chosen == .stadiaDark, stadiaApiKey.isEmpty { return .apple }
+        return chosen
+    }
+
     func makeUIView(context: Context) -> MKMapView {
         let map = MKMapView()
         map.delegate = context.coordinator
@@ -2319,11 +2343,20 @@ private struct MapBackground: UIViewRepresentable {
         // match it onto the road centerline and tilt it flat with pitch.
         // The system blue dot is suppressed.
         map.showsUserLocation = false
+        // Apple's traffic overlay only paints on Apple Maps tiles —
+        // it's a no-op once a `canReplaceMapContent = true` overlay
+        // takes over. Still enable it so Apple-basemap mode works as
+        // it does today.
         map.showsTraffic = true
         map.pointOfInterestFilter = .excludingAll
         map.overrideUserInterfaceStyle = .dark
         map.isPitchEnabled = true
         map.isRotateEnabled = true
+
+        // Apply the initial basemap (Apple is a no-op; Stadia adds
+        // the tile overlay). Kept here so the first frame doesn't
+        // briefly flash Apple Maps before updateUIView runs.
+        applyBasemap(to: map)
 
         // Restore saved camera so the user's zoom + center + pitch all carry
         // across app launches.
@@ -2373,6 +2406,11 @@ private struct MapBackground: UIViewRepresentable {
         // `MapController.applyLocationUpdate`. The user's pinch-zoom would
         // otherwise be reset by the system on every location update.
 
+        // Re-apply the basemap on every update — cheap when nothing
+        // changed (same overlay reference), swaps in/out a StadiaTile
+        // overlay when the user toggles the picker or pastes a key.
+        applyBasemap(to: uiView)
+
         // Route overlay diffing — keep only the current polyline.
         for existing in uiView.overlays.compactMap({ $0 as? MKPolyline }) where existing !== routePolyline {
             uiView.removeOverlay(existing)
@@ -2402,6 +2440,37 @@ private struct MapBackground: UIViewRepresentable {
             .filter { !existingCameraIds.contains($0.id) }
             .map { SpeedCameraAnnotation(camera: $0) }
         if !camerasToAdd.isEmpty { uiView.addAnnotations(camerasToAdd) }
+    }
+
+    // MARK: - Basemap swap
+
+    /// Install / remove the Stadia tile overlay so the live basemap
+    /// matches `activeBasemap`. Idempotent — repeated calls with the
+    /// same selection + same API key are no-ops. Called from both
+    /// `makeUIView` (first frame) and `updateUIView` (on toggle).
+    private func applyBasemap(to map: MKMapView) {
+        let existing = map.overlays.compactMap { $0 as? StadiaTileSource }
+        switch activeBasemap {
+        case .apple:
+            // Tear down any Stadia overlay we previously installed.
+            if !existing.isEmpty {
+                map.removeOverlays(existing)
+            }
+        case .stadiaDark:
+            // Already mounted with the current key? Nothing to do.
+            // Keys can change at runtime (user pastes a new one in
+            // Settings) so we tear down stale overlays here too.
+            if let mounted = existing.first, mounted.matchesKey(stadiaApiKey) {
+                return
+            }
+            if !existing.isEmpty { map.removeOverlays(existing) }
+            let overlay = StadiaTileSource(apiKey: stadiaApiKey)
+            // Insert at the BOTTOM of the `.aboveRoads` level so the
+            // route polyline (also `.aboveRoads`, added later) and
+            // all annotations stack on top. `canReplaceMapContent`
+            // suppresses Apple's own basemap drawing underneath.
+            map.insertOverlay(overlay, at: 0, level: .aboveRoads)
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -2449,6 +2518,13 @@ private struct MapBackground: UIViewRepresentable {
                 r.lineCap = .round
                 r.lineJoin = .round
                 return r
+            }
+            if let tile = overlay as? StadiaTileSource {
+                // MKTileOverlayRenderer drives MKMapView to call back
+                // into the overlay's loadTile(at:result:) for each
+                // visible tile — our disk-cache layer + Stadia fetch
+                // both ride inside that path.
+                return MKTileOverlayRenderer(tileOverlay: tile)
             }
             return MKOverlayRenderer(overlay: overlay)
         }
@@ -2641,6 +2717,37 @@ private final class CarAnnotationView: MKAnnotationView {
         // Camera sits on a Y-Z circle around the car, looking at the origin.
         cameraNode.position    = SCNVector3(0, orbitRadius * cos(p), orbitRadius * sin(p))
         cameraNode.eulerAngles = SCNVector3(-(.pi / 2) + p, 0, 0)
+    }
+}
+
+// MARK: - Stadia attribution
+
+/// Mandatory attribution label for Stadia AlidadeSmoothDark tiles
+/// (and the OSM data they're built on). Pinned bottom-right of the
+/// map, only visible while Stadia is the active basemap so we don't
+/// duplicate Apple's own attribution in Apple-Maps mode.
+private struct StadiaAttributionLabel: View {
+    @AppStorage(MapBasemap.Defaults.basemapKey)
+    private var basemapRaw: String = MapBasemap.Defaults.defaultBasemap.rawValue
+
+    @AppStorage(MapBasemap.Defaults.stadiaKeyKey)
+    private var stadiaApiKey: String = ""
+
+    var body: some View {
+        if MapBasemap(rawValue: basemapRaw) == .stadiaDark, !stadiaApiKey.isEmpty {
+            Text("© Stadia Maps · © OpenMapTiles · © OpenStreetMap")
+                .font(.system(size: 9, weight: .regular))
+                .foregroundStyle(SQ5Colors.textPrimary.opacity(0.7))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(SQ5Colors.background.opacity(0.55))
+                )
+                .padding(.trailing, 8)
+                .padding(.bottom, 4)
+                .allowsHitTesting(false)
+        }
     }
 }
 

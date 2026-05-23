@@ -12,6 +12,8 @@ struct SettingsView: View {
     @AppStorage(SpeedSource.defaultsKey) private var speedSourceRaw: String = SpeedSource.gps.rawValue
     @AppStorage(NavigatorSettings.showSpeedometerKey) private var showSpeedometer: Bool = true
     @AppStorage(NavigatorSettings.showBoostGaugeKey) private var showBoostGauge: Bool = true
+    @AppStorage(MapBasemap.Defaults.basemapKey) private var basemapRaw: String = MapBasemap.Defaults.defaultBasemap.rawValue
+    @AppStorage(MapBasemap.Defaults.stadiaKeyKey) private var stadiaApiKey: String = ""
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -23,6 +25,7 @@ struct SettingsView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 28) {
                         statusSection
+                        mapSection
                         navigatorSection
                         configSection
                         Spacer(minLength: 40)
@@ -135,6 +138,106 @@ struct SettingsView: View {
                     )
             )
         }
+    }
+
+    // MARK: - Map (basemap selection)
+
+    private var mapSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(title: "Map")
+                .padding(.bottom, 12)
+
+            VStack(spacing: 0) {
+                // Basemap picker — Apple Maps vs Stadia Dark.
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Basemap")
+                            .font(SQ5Typography.body)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                        Text(basemapHelpText)
+                            .font(SQ5Typography.caption)
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                    }
+                    Spacer()
+                    Picker("", selection: $basemapRaw) {
+                        ForEach(MapBasemap.allCases) { bm in
+                            Text(bm.displayName).tag(bm.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(SQ5Colors.accent)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+
+                Divider().background(SQ5Colors.border)
+
+                // Stadia API key — only relevant when Stadia is
+                // picked; surfaced unconditionally so the user can
+                // paste a key before flipping the picker.
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Stadia API key")
+                            .font(SQ5Typography.body)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                        Spacer()
+                        Text(stadiaKeyStatusText)
+                            .font(SQ5Typography.caption)
+                            .foregroundStyle(stadiaKeyStatusColor)
+                    }
+                    SecureField("Paste key from stadiamaps.com",
+                                text: $stadiaApiKey)
+                        .textFieldStyle(.plain)
+                        .font(SQ5Typography.mono)
+                        .foregroundStyle(SQ5Colors.textPrimary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(SQ5Colors.background)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .stroke(SQ5Colors.border, lineWidth: 1)
+                                )
+                        )
+                        .autocorrectionDisabled(true)
+                        .textInputAutocapitalization(.never)
+                    Text("Free at stadiamaps.com → sign up → API keys. ~200K tile loads/month on the free tier covers a daily driver many times over.")
+                        .font(SQ5Typography.caption)
+                        .foregroundStyle(SQ5Colors.textTertiary)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(SQ5Colors.surface)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(SQ5Colors.border, lineWidth: 1)
+                    )
+            )
+        }
+    }
+
+    private var basemapHelpText: String {
+        switch MapBasemap(rawValue: basemapRaw) ?? .apple {
+        case .apple:
+            return "Apple Maps with native traffic + POIs. Tile cache opaque."
+        case .stadiaDark:
+            return stadiaApiKey.isEmpty
+                ? "Stadia selected, but no key set — falling back to Apple Maps."
+                : "OSM-data dark style. Tiles disk-cached for 30 days; offline-friendly."
+        }
+    }
+
+    private var stadiaKeyStatusText: String {
+        stadiaApiKey.isEmpty ? "Missing" : "Configured"
+    }
+
+    private var stadiaKeyStatusColor: Color {
+        stadiaApiKey.isEmpty ? SQ5Colors.warning : SQ5Colors.success
     }
 
     // MARK: - Config (placeholder for now)
