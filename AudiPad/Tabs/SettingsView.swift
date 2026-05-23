@@ -35,6 +35,7 @@ struct SettingsView: View {
                         statusSection
                         mapSection
                         navigatorSection
+                        voiceSection
                         dashcamSection
                         configSection
                         Spacer(minLength: 40)
@@ -247,6 +248,74 @@ struct SettingsView: View {
 
     private var stadiaKeyStatusColor: Color {
         stadiaApiKey.isEmpty ? SQ5Colors.warning : SQ5Colors.success
+    }
+
+    // MARK: - Voice
+
+    private var voiceSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(title: "Voice")
+                .padding(.bottom, 12)
+
+            VStack(spacing: 0) {
+                // Active voice readout — name + language + quality pill.
+                HStack(alignment: .center, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Active voice")
+                            .font(SQ5Typography.body)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                        Text(voiceMetaLine)
+                            .font(SQ5Typography.caption)
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                    }
+                    Spacer()
+                    VoiceQualityPill(label: VoiceConfig.pickedVoiceQualityLabel,
+                                     isDefault: VoiceConfig.pickedVoiceIsDefaultQuality)
+                    Button(action: { VoiceConfig.speakTestPhrase() }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "speaker.wave.2.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text("TEST")
+                                .font(.system(size: 11, weight: .heavy))
+                                .tracking(1.6)
+                        }
+                        .foregroundStyle(SQ5Colors.textPrimary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(SQ5Colors.accent.opacity(0.85), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+
+                if VoiceConfig.pickedVoiceIsDefaultQuality {
+                    Divider().background(SQ5Colors.border)
+                    Text("For a much better voice: iOS Settings → Accessibility → Spoken Content → Voices → Suomi → tap an Enhanced or Premium voice to download. AudiPad will pick the best one available on next launch.")
+                        .font(SQ5Typography.caption)
+                        .foregroundStyle(SQ5Colors.textTertiary)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(SQ5Colors.surface)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(SQ5Colors.border, lineWidth: 1)
+                    )
+            )
+        }
+    }
+
+    private var voiceMetaLine: String {
+        let name = VoiceConfig.pickedVoiceName ?? "none"
+        let lang = VoiceConfig.pickedVoiceLanguage ?? "?"
+        return "\(name) · \(lang)"
     }
 
     // MARK: - Dashcam
@@ -697,6 +766,33 @@ private struct DashcamSegmentRow: View {
     private static func size(_ bytes: Int64) -> String {
         let mb = Double(bytes) / 1_048_576
         return String(format: "%.1f MB", mb)
+    }
+}
+
+/// Coloured pill for the active voice's quality tier. Premium →
+/// success green, Enhanced → accent, Default → warning amber (so
+/// the user knows there's a better option available).
+private struct VoiceQualityPill: View {
+    let label: String
+    let isDefault: Bool
+
+    var body: some View {
+        Text(label.uppercased())
+            .font(.system(size: 10, weight: .heavy, design: .monospaced))
+            .tracking(1.6)
+            .foregroundStyle(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .stroke(color.opacity(0.7), lineWidth: 1)
+            )
+    }
+
+    private var color: Color {
+        if isDefault { return SQ5Colors.warning }
+        if label.lowercased() == "premium" { return SQ5Colors.success }
+        return SQ5Colors.accent
     }
 }
 
