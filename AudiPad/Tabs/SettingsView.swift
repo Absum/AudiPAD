@@ -15,6 +15,13 @@ struct SettingsView: View {
     @AppStorage(MapBasemap.Defaults.basemapKey) private var basemapRaw: String = MapBasemap.Defaults.defaultBasemap.rawValue
     @AppStorage(MapBasemap.Defaults.stadiaKeyKey) private var stadiaApiKey: String = ""
 
+    @AppStorage(DashcamService.enabledKey)       private var dashcamEnabled: Bool = DashcamService.defaultEnabled
+    @AppStorage(DashcamService.segmentSecondsKey) private var dashcamSegmentSeconds: Int = DashcamService.defaultSegmentSeconds
+    @AppStorage(DashcamService.maxSegmentsKey)   private var dashcamMaxSegments: Int = DashcamService.defaultMaxSegments
+    @AppStorage(DashcamService.audioEnabledKey)  private var dashcamAudioEnabled: Bool = DashcamService.defaultAudioEnabled
+
+    @EnvironmentObject private var dashcam: DashcamService
+
     var body: some View {
         ZStack(alignment: .top) {
             SQ5Colors.background.ignoresSafeArea()
@@ -27,6 +34,7 @@ struct SettingsView: View {
                         statusSection
                         mapSection
                         navigatorSection
+                        dashcamSection
                         configSection
                         Spacer(minLength: 40)
                     }
@@ -240,6 +248,176 @@ struct SettingsView: View {
         stadiaApiKey.isEmpty ? SQ5Colors.warning : SQ5Colors.success
     }
 
+    // MARK: - Dashcam
+
+    private var dashcamSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(title: "Dashcam")
+                .padding(.bottom, 12)
+
+            VStack(spacing: 0) {
+                // Master enable
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Enable loop recording")
+                            .font(SQ5Typography.body)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                        Text(dashcamStatusText)
+                            .font(SQ5Typography.caption)
+                            .foregroundStyle(dashcamStatusColor)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $dashcamEnabled)
+                        .labelsHidden()
+                        .tint(SQ5Colors.accent)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                Divider().background(SQ5Colors.border)
+
+                // Segment length picker
+                HStack {
+                    Text("Segment length")
+                        .font(SQ5Typography.body)
+                        .foregroundStyle(SQ5Colors.textPrimary)
+                    Spacer()
+                    Picker("", selection: $dashcamSegmentSeconds) {
+                        ForEach(DashcamService.allowedSegmentSeconds, id: \.self) { s in
+                            Text("\(s) s").tag(s)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(SQ5Colors.accent)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                Divider().background(SQ5Colors.border)
+
+                // Max segments picker
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Loop capacity")
+                            .font(SQ5Typography.body)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                        Text("≈ \(dashcamLoopMinutes) min of footage")
+                            .font(SQ5Typography.caption)
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                    }
+                    Spacer()
+                    Picker("", selection: $dashcamMaxSegments) {
+                        ForEach(DashcamService.allowedMaxSegments, id: \.self) { c in
+                            Text("\(c) segs").tag(c)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(SQ5Colors.accent)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                Divider().background(SQ5Colors.border)
+
+                // Audio toggle
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Record audio")
+                            .font(SQ5Typography.body)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                        Text("Useful for incident recall; needs mic access")
+                            .font(SQ5Typography.caption)
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $dashcamAudioEnabled)
+                        .labelsHidden()
+                        .tint(SQ5Colors.accent)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                Divider().background(SQ5Colors.border)
+
+                // Storage usage + segment list
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Storage")
+                            .font(SQ5Typography.body)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                        Spacer()
+                        Text(formatBytes(dashcam.totalStorageBytes))
+                            .font(SQ5Typography.caption)
+                            .foregroundStyle(SQ5Colors.textSecondary)
+                            .monospacedDigit()
+                    }
+                    Text("Segments live in Documents/dashcam/ and are excluded from iCloud backup.")
+                        .font(SQ5Typography.caption)
+                        .foregroundStyle(SQ5Colors.textTertiary)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+
+                if !dashcam.segments.isEmpty {
+                    Divider().background(SQ5Colors.border)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Recent segments")
+                            .font(SQ5Typography.caption)
+                            .tracking(1.5)
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                            .padding(.bottom, 4)
+                        ForEach(dashcam.segments.prefix(8)) { seg in
+                            DashcamSegmentRow(segment: seg,
+                                              onLock: { dashcam.lockCurrentSegment() },
+                                              onUnlock: { dashcam.unlockSegment(seg) },
+                                              onDelete: { dashcam.deleteSegment(seg) })
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 14)
+                }
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(SQ5Colors.surface)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(SQ5Colors.border, lineWidth: 1)
+                    )
+            )
+        }
+    }
+
+    private var dashcamLoopMinutes: Int {
+        max(1, (dashcamSegmentSeconds * dashcamMaxSegments) / 60)
+    }
+
+    private var dashcamStatusText: String {
+        switch dashcam.state {
+        case .disabled:                  return "Off"
+        case .awaitingPermission:        return "Requesting permission…"
+        case .permissionDenied(let m):   return m
+        case .starting:                  return "Starting…"
+        case .active:                    return "Recording (\(dashcamSegmentSeconds) s segments)"
+        case .error(let m):              return "Error: \(m)"
+        }
+    }
+
+    private var dashcamStatusColor: Color {
+        switch dashcam.state {
+        case .active:                       return SQ5Colors.success
+        case .starting, .awaitingPermission: return SQ5Colors.warning
+        case .permissionDenied, .error:     return SQ5Colors.danger
+        case .disabled:                     return SQ5Colors.textTertiary
+        }
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        let kb = 1024.0, mb = kb * 1024, gb = mb * 1024
+        let b = Double(bytes)
+        if b >= gb { return String(format: "%.2f GB", b / gb) }
+        if b >= mb { return String(format: "%.1f MB", b / mb) }
+        return String(format: "%.0f KB", b / kb)
+    }
+
     // MARK: - Config (placeholder for now)
 
     private var configSection: some View {
@@ -429,6 +607,66 @@ private struct StatusRow: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
+    }
+}
+
+/// Single-row dashcam segment with timestamp, size, and inline
+/// lock-toggle + delete buttons. Plain text + tiny SF Symbols so the
+/// list fits a lot of segments without scrolling exploding.
+private struct DashcamSegmentRow: View {
+    let segment: DashcamSegment
+    let onLock: () -> Void
+    let onUnlock: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: segment.isLocked ? "lock.fill" : "circle.dotted")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(segment.isLocked ? SQ5Colors.warning : SQ5Colors.textTertiary)
+                .frame(width: 14)
+            Text(Self.formatter.string(from: segment.recordedAt))
+                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                .foregroundStyle(SQ5Colors.textSecondary)
+            Spacer()
+            Text(Self.size(segment.fileSizeBytes))
+                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                .foregroundStyle(SQ5Colors.textTertiary)
+                .monospacedDigit()
+            if segment.isLocked {
+                Button(action: onUnlock) {
+                    Image(systemName: "lock.open")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(SQ5Colors.textSecondary)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Button(action: onLock) {
+                    Image(systemName: "lock")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(SQ5Colors.textSecondary)
+                }
+                .buttonStyle(.plain)
+            }
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(SQ5Colors.danger.opacity(0.85))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private static let formatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d · HH:mm:ss"
+        return f
+    }()
+
+    private static func size(_ bytes: Int64) -> String {
+        let mb = Double(bytes) / 1_048_576
+        return String(format: "%.1f MB", mb)
     }
 }
 

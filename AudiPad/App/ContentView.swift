@@ -27,6 +27,9 @@ struct ContentView: View {
     @StateObject private var racing = RacingService()
     @StateObject private var motion = MotionService()
     @StateObject private var lapTimer = LapTimerService()
+    @StateObject private var dashcam = DashcamService()
+
+    @AppStorage(DashcamService.enabledKey) private var dashcamEnabled: Bool = DashcamService.defaultEnabled
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -89,15 +92,26 @@ struct ContentView: View {
         .environmentObject(racing)
         .environmentObject(motion)
         .environmentObject(lapTimer)
+        .environmentObject(dashcam)
         .onChange(of: scenePhase) { phase in
-            // Pause CoreMotion when backgrounded — saves a small but
-            // steady chunk of CPU + battery on an iPad permanently
-            // mounted in the car.
+            // Pause CoreMotion + dashcam when backgrounded — saves
+            // CPU + battery, and AVCaptureSession is required to
+            // stop when the app loses foreground anyway.
             switch phase {
-            case .active:                motion.start()
-            case .inactive, .background: motion.stop()
-            @unknown default:            break
+            case .active:
+                motion.start()
+                if dashcamEnabled { dashcam.enable() }
+            case .inactive, .background:
+                motion.stop()
+                dashcam.disable()
+            @unknown default:
+                break
             }
+        }
+        .onChange(of: dashcamEnabled) { enabled in
+            // User flipped the dashcam toggle in Settings. Honor
+            // immediately so they can verify the recording light.
+            if enabled { dashcam.enable() } else { dashcam.disable() }
         }
         .background(SQ5Colors.background.ignoresSafeArea())
         .onAppear {
@@ -107,6 +121,12 @@ struct ContentView: View {
             // scenePhase's onChange may not fire on initial launch since
             // the value didn't transition — kick motion explicitly here.
             motion.start()
+            // Same caveat for the dashcam — if the user had it on
+            // last session and we're cold-launching, enable here.
+            if dashcamEnabled { dashcam.enable() }
+            // Refresh the segment list so the Settings page shows
+            // any segments left over from previous sessions.
+            dashcam.refreshSegments()
             traffic.start(movingProvider: { [weak vehicle] in
                 guard let vehicle else { return false }
                 return vehicle.snapshot.speedKph > 5
