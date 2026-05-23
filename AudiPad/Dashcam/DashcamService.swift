@@ -314,6 +314,10 @@ final class DashcamService: NSObject, ObservableObject {
         // mark that the preview-only mode no longer owns the camera.
         let wasInPreview = inPreviewMode
         inPreviewMode = false
+        // Snapshot orientation here on MainActor — UIWindowScene
+        // reads are main-thread-only, and the sessionQueue block
+        // below needs to apply it to the movie-output connection.
+        let videoOrientation = DashcamOrientation.currentVideoOrientation
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.session.beginConfiguration()
@@ -367,6 +371,13 @@ final class DashcamService: NSObject, ObservableObject {
                 if let conn = self.movieOutput.connection(with: .video) {
                     if conn.isVideoStabilizationSupported {
                         conn.preferredVideoStabilizationMode = .auto
+                    }
+                    // Recorded files match the active app orientation —
+                    // otherwise the segment plays back in portrait
+                    // (the camera's native orientation) and is
+                    // unwatchable for incident review.
+                    if conn.isVideoOrientationSupported {
+                        conn.videoOrientation = videoOrientation
                     }
                 }
             } else {
@@ -544,6 +555,7 @@ final class DashcamService: NSObject, ObservableObject {
         f.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         return f.date(from: base)
     }
+
 }
 
 // MARK: - AVCaptureFileOutputRecordingDelegate
