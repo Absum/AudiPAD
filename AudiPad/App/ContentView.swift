@@ -121,6 +121,13 @@ struct ContentView: View {
             // scenePhase's onChange may not fire on initial launch since
             // the value didn't transition — kick motion explicitly here.
             motion.start()
+            // Hand the dashcam its overlay data sources before any
+            // recording starts, so the burned-in overlay has real
+            // speed / road / G-force / GPS the moment a segment
+            // begins instead of dashes.
+            dashcam.configure(location: locationService,
+                              roadLimits: roadLimits,
+                              motion: motion)
             // Same caveat for the dashcam — if the user had it on
             // last session and we're cold-launching, enable here.
             if dashcamEnabled { dashcam.enable() }

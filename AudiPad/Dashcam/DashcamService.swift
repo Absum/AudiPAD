@@ -80,12 +80,41 @@ final class DashcamService: NSObject, ObservableObject {
     // MARK: - Internal
     private var videoInput: AVCaptureDeviceInput?
     private var audioInput: AVCaptureDeviceInput?
-    private let movieOutput = AVCaptureMovieFileOutput()
-    private var rotationTask: Task<Void, Never>?
-    private var currentSegmentURL: URL?
+    private let videoDataOutput = AVCaptureVideoDataOutput()
+    private let audioDataOutput = AVCaptureAudioDataOutput()
+    private let pipeline = DashcamRecordingPipeline()
+    private var overlayStateTask: Task<Void, Never>?
 
     /// Serial queue for AVCaptureSession config — mandated by AVF.
     private let sessionQueue = DispatchQueue(label: "audipad.dashcam.session")
+
+    /// Dedicated sample-buffer queue — keeps the AVCapture pipeline
+    /// off the session-config queue so config + sample handling
+    /// don't block each other.
+    private let sampleQueue = DispatchQueue(label: "audipad.dashcam.samples",
+                                            qos: .userInitiated)
+
+    // MARK: - Overlay data sources
+    //
+    // Weak refs so DashcamService can ask LocationService /
+    // RoadSpeedLimitService / MotionService for current values when
+    // refreshing the overlay state. Configured by ContentView at
+    // startup; nil-tolerant so the dashcam still works if any
+    // service is unavailable.
+    weak var location: LocationService?
+    weak var roadLimits: RoadSpeedLimitService?
+    weak var motion: MotionService?
+
+    func configure(location: LocationService,
+                   roadLimits: RoadSpeedLimitService,
+                   motion: MotionService) {
+        self.location = location
+        self.roadLimits = roadLimits
+        self.motion = motion
+        pipeline.onSegmentFinished = { [weak self] url in
+            Task { @MainActor in self?.handleSegmentFinished(url: url) }
+        }
+    }
 
     // MARK: - Public API
 
@@ -115,10 +144,14 @@ final class DashcamService: NSObject, ObservableObject {
 
     /// Stop everything cleanly. Active segment is finalized.
     func disable() {
-        rotationTask?.cancel()
-        rotationTask = nil
-        if movieOutput.isRecording {
-            movieOutput.stopRecording()
+        overlayStateTask?.cancel()
+        overlayStateTask = nil
+        // Mark the pipeline disabled — next sample buffer will be
+        // dropped. Then finalize the in-flight writer so the segment
+        // file isn't left half-written.
+        pipeline.updateConfig { $0.enabled = false }
+        Task.detached { [pipeline] in
+            _ = await pipeline.finishCurrentSegment()
         }
         sessionQueue.async { [weak self] in
             self?.session.stopRunning()
@@ -365,69 +398,115 @@ final class DashcamService: NSObject, ObservableObject {
                 self.audioInput = micIn
             }
 
-            // Movie file output — one per segment, recycled.
-            if self.session.canAddOutput(self.movieOutput) {
-                self.session.addOutput(self.movieOutput)
-                if let conn = self.movieOutput.connection(with: .video) {
+            // Video + audio DATA outputs — we own the sample buffers,
+            // composite the overlay onto each frame in the pipeline,
+            // and write through AVAssetWriter. (Replaces the previous
+            // AVCaptureMovieFileOutput.)
+            self.videoDataOutput.setSampleBufferDelegate(self.pipeline,
+                                                         queue: self.sampleQueue)
+            self.videoDataOutput.alwaysDiscardsLateVideoFrames = true
+            self.videoDataOutput.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            ]
+            if self.session.canAddOutput(self.videoDataOutput) {
+                self.session.addOutput(self.videoDataOutput)
+                if let conn = self.videoDataOutput.connection(with: .video) {
                     if conn.isVideoStabilizationSupported {
                         conn.preferredVideoStabilizationMode = .auto
                     }
-                    // Recorded files match the active app orientation —
-                    // otherwise the segment plays back in portrait
-                    // (the camera's native orientation) and is
-                    // unwatchable for incident review.
                     if conn.isVideoOrientationSupported {
                         conn.videoOrientation = videoOrientation
                     }
                 }
             } else {
                 Task { @MainActor in
-                    self.state = .error("Couldn't add movie output to session.")
+                    self.state = .error("Couldn't add video data output to session.")
                 }
                 self.session.commitConfiguration()
                 return
+            }
+
+            self.audioDataOutput.setSampleBufferDelegate(self.pipeline,
+                                                         queue: self.sampleQueue)
+            if self.session.canAddOutput(self.audioDataOutput) {
+                self.session.addOutput(self.audioDataOutput)
             }
 
             self.session.commitConfiguration()
             self.session.startRunning()
 
             Task { @MainActor in
-                self.beginRotation()
+                self.beginRecording()
                 self.state = .active
             }
         }
     }
 
-    // MARK: - Segment rotation
+    // MARK: - Recording lifecycle
 
-    private func beginRotation() {
+    private func beginRecording() {
         try? FileManager.default.createDirectory(at: Self.segmentsDir,
                                                  withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: Self.lockedDir,
                                                  withIntermediateDirectories: true)
-        startNewSegment()
-        rotationTask?.cancel()
-        rotationTask = Task { [weak self] in
+        pipeline.updateConfig {
+            $0.enabled = true
+            $0.segmentsDir = Self.segmentsDir
+            $0.segmentSeconds = self.segmentSecondsPref
+        }
+        startOverlayStateLoop()
+    }
+
+    /// Pushes overlay data into the pipeline a few times per second.
+    /// Cheap — just reads the current values from each service and
+    /// hands them to the pipeline (which the sample queue then reads
+    /// per frame). Stops on cancel.
+    private func startOverlayStateLoop() {
+        overlayStateTask?.cancel()
+        overlayStateTask = Task { [weak self] in
             while !Task.isCancelled {
-                let seconds = self?.segmentSecondsPref ?? Self.defaultSegmentSeconds
-                try? await Task.sleep(for: .seconds(Double(seconds)))
-                if Task.isCancelled { break }
-                await self?.rotateSegment()
+                self?.pushOverlayState()
+                try? await Task.sleep(for: .milliseconds(250))
             }
         }
+        // Push immediately so the first frame already has data.
+        pushOverlayState()
     }
 
-    private func startNewSegment() {
-        let url = Self.segmentsDir.appendingPathComponent("\(Self.timestamp()).mp4")
-        currentSegmentURL = url
-        movieOutput.startRecording(to: url, recordingDelegate: self)
+    private func pushOverlayState() {
+        let loc = location?.location
+        let road = roadLimits?.currentRoad
+        let state = DashcamOverlayRenderer.State(
+            date: Date(),
+            speedKph: loc.flatMap { $0.speed >= 0 ? $0.speed * 3.6 : nil },
+            roadName: road?.name,
+            roadRef: road?.ref,
+            lateralG: motion?.currentLateralG,
+            longitudinalG: motion?.currentLongitudinalG,
+            coordinate: loc?.coordinate
+        )
+        pipeline.setOverlayState(state)
+        // Also keep the pipeline's segment-seconds preference in sync
+        // in case the user changed it in Settings.
+        pipeline.updateConfig { $0.segmentSeconds = self.segmentSecondsPref }
     }
 
-    private func rotateSegment() {
-        // Stopping triggers the delegate, which starts the next one.
-        if movieOutput.isRecording {
-            movieOutput.stopRecording()
+    private func handleSegmentFinished(url: URL) {
+        // Sealed segment file — exclude from iCloud backup, run the
+        // cleanup routine, refresh the published segments list.
+        var u = url
+        var resourceValues = URLResourceValues()
+        resourceValues.isExcludedFromBackup = true
+        try? u.setResourceValues(resourceValues)
+
+        if lockRequestedForCurrent {
+            let dest = Self.lockedDir.appendingPathComponent(url.lastPathComponent)
+            try? FileManager.default.moveItem(at: url, to: dest)
+            lockRequestedForCurrent = false
         }
+
+        enforceCap()
+        refreshSegments()
     }
 
     // MARK: - Cleanup (loop cap enforcement)
@@ -558,41 +637,8 @@ final class DashcamService: NSObject, ObservableObject {
 
 }
 
-// MARK: - AVCaptureFileOutputRecordingDelegate
-
-extension DashcamService: AVCaptureFileOutputRecordingDelegate {
-    nonisolated func fileOutput(_ output: AVCaptureFileOutput,
-                                didFinishRecordingTo outputFileURL: URL,
-                                from connections: [AVCaptureConnection],
-                                error: Error?) {
-        // AVF calls this on a background queue. Hop to MainActor for
-        // state mutations + filesystem bookkeeping.
-        Task { @MainActor in
-            // Flag the file as not-iCloud-backed so segments don't
-            // sync to iCloud Drive (would be silly for ~30 min of
-            // looping dashcam).
-            var resourceValues = URLResourceValues()
-            resourceValues.isExcludedFromBackup = true
-            var mutableURL = outputFileURL
-            try? mutableURL.setResourceValues(resourceValues)
-
-            // Lock the just-finished segment if the user pressed Lock
-            // during this segment's lifetime.
-            if self.lockRequestedForCurrent {
-                let dest = Self.lockedDir
-                    .appendingPathComponent(outputFileURL.lastPathComponent)
-                try? FileManager.default.moveItem(at: outputFileURL, to: dest)
-                self.lockRequestedForCurrent = false
-            }
-
-            self.enforceCap()
-            self.refreshSegments()
-
-            // If we're still supposed to be recording, kick the
-            // next segment immediately so the gap is sub-frame.
-            if self.state == .active {
-                self.startNewSegment()
-            }
-        }
-    }
-}
+// Segment-finished handling lives in
+// `DashcamService.handleSegmentFinished(url:)` now — driven by the
+// DashcamRecordingPipeline's onSegmentFinished callback. The old
+// AVCaptureFileOutputRecordingDelegate path is gone with the
+// AVCaptureMovieFileOutput it served.
