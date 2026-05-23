@@ -46,6 +46,17 @@ struct SettingsView: View {
                 }
             }
         }
+        .onAppear {
+            // Light up the dashcam preview only while Settings is on
+            // screen. If recording is already on, this is a no-op
+            // (the recording session already serves the preview);
+            // otherwise it spins up an input-only session so the
+            // user can verify mount alignment.
+            dashcam.startPreview()
+        }
+        .onDisappear {
+            dashcam.stopPreview()
+        }
     }
 
     // MARK: - Status (diagnostic — proves data is flowing)
@@ -326,6 +337,41 @@ struct SettingsView: View {
                 .padding(.bottom, 12)
 
             VStack(spacing: 0) {
+                // Live preview — surfaces what the back camera sees
+                // so the user can verify mount alignment without
+                // committing to recording. Lifecycle hooks at the
+                // bottom of this section call startPreview/stopPreview
+                // so the camera only powers up while this section is
+                // on screen.
+                ZStack {
+                    if dashcam.isShowingPreview {
+                        DashcamPreviewView(session: dashcam.session)
+                    } else {
+                        Rectangle()
+                            .fill(SQ5Colors.background)
+                            .overlay(
+                                VStack(spacing: 6) {
+                                    Image(systemName: "video.slash")
+                                        .font(.system(size: 22, weight: .regular))
+                                        .foregroundStyle(SQ5Colors.textTertiary)
+                                    Text("PREVIEW UNAVAILABLE")
+                                        .font(.system(size: 9, weight: .heavy))
+                                        .tracking(1.6)
+                                        .foregroundStyle(SQ5Colors.textTertiary)
+                                }
+                            )
+                    }
+                }
+                .aspectRatio(16.0/9.0, contentMode: .fit)
+                .overlay(
+                    Rectangle()
+                        .stroke(SQ5Colors.border, lineWidth: 1)
+                )
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+
+                Divider().background(SQ5Colors.border)
+
                 // Master enable
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {

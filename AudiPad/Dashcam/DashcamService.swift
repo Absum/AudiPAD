@@ -65,9 +65,19 @@ final class DashcamService: NSObject, ObservableObject {
         return false
     }
 
-    // MARK: - Internal
+    /// `true` while a preview-only session is running OR while
+    /// recording is active (both share the same underlying session,
+    /// which the preview layer can hook into). The Settings preview
+    /// view binds to this to decide whether to render the layer.
+    @Published private(set) var isShowingPreview: Bool = false
 
-    private let session = AVCaptureSession()
+    /// Public-readable AVCaptureSession so a SwiftUI
+    /// `UIViewRepresentable` can attach an `AVCaptureVideoPreviewLayer`
+    /// to it. Don't mutate from outside the service — all session
+    /// reconfig has to go through sessionQueue for thread safety.
+    let session = AVCaptureSession()
+
+    // MARK: - Internal
     private var videoInput: AVCaptureDeviceInput?
     private var audioInput: AVCaptureDeviceInput?
     private let movieOutput = AVCaptureMovieFileOutput()
@@ -110,10 +120,116 @@ final class DashcamService: NSObject, ObservableObject {
         if movieOutput.isRecording {
             movieOutput.stopRecording()
         }
-        sessionQueue.async { [session] in
-            session.stopRunning()
+        sessionQueue.async { [weak self] in
+            self?.session.stopRunning()
+            // If a preview observer is still around, leave the
+            // session inputs in place so a follow-up startPreview()
+            // can resume without re-asking the user for permissions.
+            // Inputs only get torn down on stopPreview when neither
+            // mode wants the camera any more.
         }
+        // Preserve isShowingPreview if a Settings preview is mounted
+        // alongside an active recording that just stopped — the view
+        // will call stopPreview() on its own lifecycle.
         state = .disabled
+    }
+
+    // MARK: - Preview-only mode
+
+    /// `true` while a preview-only session is keeping the camera
+    /// alive without any recording. Used to decide whether
+    /// `stopPreview()` should actually shut the session down.
+    private var inPreviewMode = false
+
+    /// Begin (or resume) a live camera preview. If recording is on,
+    /// the session is already running and this is just a flag flip —
+    /// the same preview layer renders against the recording session.
+    /// If recording is off, configures the session for input-only
+    /// capture (no movie output, no rotation) so the user can verify
+    /// mount alignment without committing to disk.
+    func startPreview() {
+        // Session already running for recording → just light up the
+        // preview flag so the SwiftUI view renders the layer.
+        if isRecording {
+            if !isShowingPreview { isShowingPreview = true }
+            return
+        }
+        // Already in preview-only mode → idempotent.
+        if inPreviewMode {
+            if !isShowingPreview { isShowingPreview = true }
+            return
+        }
+
+        Task { [weak self] in
+            guard let self else { return }
+            let videoOK = await Self.requestVideo()
+            guard videoOK else {
+                self.state = .permissionDenied("Camera access denied. Enable in iOS Settings → AudiPad.")
+                return
+            }
+            self.inPreviewMode = true
+            self.isShowingPreview = true
+            self.startSessionForPreview()
+        }
+    }
+
+    /// Tear down a preview-only session. No-op if recording is on
+    /// (the recording session owns the camera until disable() is
+    /// called). The Settings view typically calls this on its
+    /// .onDisappear.
+    func stopPreview() {
+        isShowingPreview = false
+        if isRecording { return }      // recording still wants the camera
+        guard inPreviewMode else { return }
+        inPreviewMode = false
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+            self.session.beginConfiguration()
+            for input in self.session.inputs {
+                self.session.removeInput(input)
+            }
+            for output in self.session.outputs {
+                self.session.removeOutput(output)
+            }
+            self.session.commitConfiguration()
+            self.videoInput = nil
+            self.audioInput = nil
+        }
+    }
+
+    private func startSessionForPreview() {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.session.beginConfiguration()
+            self.session.sessionPreset = .high
+
+            // Video input — back camera, fall back to any video device.
+            let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera,
+                                                      for: .video,
+                                                      position: .back)
+                ?? AVCaptureDevice.default(for: .video)
+            if let videoDevice,
+               let videoIn = try? AVCaptureDeviceInput(device: videoDevice),
+               self.session.canAddInput(videoIn) {
+                self.session.addInput(videoIn)
+                self.videoInput = videoIn
+            } else {
+                Task { @MainActor in
+                    self.inPreviewMode = false
+                    self.isShowingPreview = false
+                    self.state = .error("No camera available on this device.")
+                }
+                self.session.commitConfiguration()
+                return
+            }
+            // Preview deliberately skips the audio input + movie
+            // output — we only need frames in the preview layer.
+            self.session.commitConfiguration()
+            self.session.startRunning()
+        }
     }
 
     /// Lock the current segment so the loop-deletion skips it.
@@ -194,10 +310,27 @@ final class DashcamService: NSObject, ObservableObject {
 
     private func startSession() {
         state = .starting
+        // Preview, if any, is being upgraded to a recording session;
+        // mark that the preview-only mode no longer owns the camera.
+        let wasInPreview = inPreviewMode
+        inPreviewMode = false
         sessionQueue.async { [weak self] in
             guard let self else { return }
             self.session.beginConfiguration()
             self.session.sessionPreset = .high
+
+            // Wipe whatever the preview mode (or a previous run) put
+            // in — gives us a clean slate so addInput / addOutput
+            // never fail with "already added".
+            for input in self.session.inputs {
+                self.session.removeInput(input)
+            }
+            for output in self.session.outputs {
+                self.session.removeOutput(output)
+            }
+            self.videoInput = nil
+            self.audioInput = nil
+            _ = wasInPreview // future: could log/telemetry the transition
 
             // Video input — back camera, fall back to any video device.
             let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera,
