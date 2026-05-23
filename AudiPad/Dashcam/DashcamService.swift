@@ -270,6 +270,12 @@ final class DashcamService: NSObject, ObservableObject {
     /// finalises (didFinishRecordingTo) so we can preserve the
     /// in-flight file properly.
     private var lockRequestedForCurrent = false
+    /// Set alongside `lockRequestedForCurrent` when the user pressed
+    /// SAVE in the TopBar — the just-finished segment should also be
+    /// exported to Photos so iCloud syncs it to the user's other
+    /// devices. Lock alone (from the Settings list) doesn't trigger
+    /// Photos export.
+    private var photosSaveRequestedForCurrent = false
     func lockCurrentSegment() {
         lockRequestedForCurrent = true
     }
@@ -294,13 +300,28 @@ final class DashcamService: NSObject, ObservableObject {
         let candidates = enumerateActiveSegments().filter {
             $0.recordedAt >= cutoff
         }
+        var exportedURLs: [URL] = []
         for seg in candidates {
             let dest = Self.lockedDir.appendingPathComponent(seg.url.lastPathComponent)
-            try? FileManager.default.moveItem(at: seg.url, to: dest)
+            do {
+                try FileManager.default.moveItem(at: seg.url, to: dest)
+                exportedURLs.append(dest)
+            } catch {
+                // Already moved or filesystem race — best effort,
+                // skip the export for this one.
+            }
         }
-        // Also lock the in-flight segment — it's the one currently
-        // covering the most-recent moment of the save window.
+        // Photos export — fire-and-forget. iCloud Photos picks them
+        // up and replicates to iPhone / Mac / other iPads.
+        for dest in exportedURLs {
+            Task { await DashcamPhotosExporter.export(dest) }
+        }
+        // Also lock + Photos-export the in-flight segment — it's
+        // the one currently covering the most-recent moment of the
+        // save window. The actual export happens in
+        // handleSegmentFinished when the writer finalises this seg.
         lockRequestedForCurrent = true
+        photosSaveRequestedForCurrent = true
         refreshSegments()
         lastSaveAcknowledged = (now, seconds)
 
@@ -499,10 +520,23 @@ final class DashcamService: NSObject, ObservableObject {
         resourceValues.isExcludedFromBackup = true
         try? u.setResourceValues(resourceValues)
 
+        var finalURL = url
         if lockRequestedForCurrent {
             let dest = Self.lockedDir.appendingPathComponent(url.lastPathComponent)
-            try? FileManager.default.moveItem(at: url, to: dest)
+            do {
+                try FileManager.default.moveItem(at: url, to: dest)
+                finalURL = dest
+            } catch {
+                // Already moved or filesystem race — keep finalURL
+                // pointing at the original location for the Photos
+                // export below.
+            }
             lockRequestedForCurrent = false
+        }
+
+        if photosSaveRequestedForCurrent {
+            photosSaveRequestedForCurrent = false
+            Task { await DashcamPhotosExporter.export(finalURL) }
         }
 
         enforceCap()

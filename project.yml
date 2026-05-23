@@ -72,6 +72,11 @@ targets:
         # Documents/dashcam/ on the device.
         NSCameraUsageDescription: AudiPad's dashcam records continuous video of the road ahead while you drive, in case you need to review an incident later.
         NSMicrophoneUsageDescription: AudiPad's dashcam records audio alongside the video so you can hear the context of any incident on playback. Audio is togglable in Settings.
+        # Photos library add-only access — when the user taps SAVE
+        # to lock a segment, the file is also exported to Photos so
+        # iCloud Photos can sync it to the user's other devices
+        # (iPhone, Mac, other iPads). Read access never requested.
+        NSPhotoLibraryAddUsageDescription: AudiPad saves dashcam clips you mark with the SAVE button to your Photos library so they sync to your other devices via iCloud Photos.
         # Custom URL scheme — Spotify auth callback returns here after the
         # user taps "Authorize" in the Spotify app.
         CFBundleURLTypes:
