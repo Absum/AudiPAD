@@ -3,6 +3,7 @@ import SwiftUI
 struct DriveView: View {
     @EnvironmentObject private var vehicle: VehicleViewModel
     @EnvironmentObject private var location: LocationService
+    @EnvironmentObject private var motion: MotionService
 
     @AppStorage(SpeedSource.defaultsKey) private var speedSourceRaw: String = SpeedSource.gps.rawValue
 
@@ -48,6 +49,8 @@ struct DriveView: View {
                              unit: "°C",
                              progress: vehicle.snapshot.oilC / 140.0,
                              warnThreshold: 0.85)
+                    KpiDivider()
+                    GMeterHeroCell(motion: motion)
                 }
                 .padding(.horizontal, 20)
 
@@ -175,6 +178,74 @@ private struct HeroStat: View {
                         .frame(width: max(0, geo.size.width * clamped), height: 3)
                         .animation(.easeOut(duration: 0.4), value: clamped)
                         .animation(.easeInOut(duration: 0.25), value: fillColor)
+                }
+            }
+            .frame(height: 3)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 16)
+    }
+}
+
+/// Drive-tab variant of the G-meter — same column proportions as
+/// `HeroStat` (matching uppercase label + monospaced value baseline +
+/// thin fill underline) but with the widget itself in place of the
+/// big number. Lateral magnitude drives the underline so a hard
+/// corner registers in the same visual language as boost / throttle.
+private struct GMeterHeroCell: View {
+    @ObservedObject var motion: MotionService
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("G-FORCE")
+                .font(SQ5Typography.caption)
+                .tracking(1.8)
+                .foregroundStyle(SQ5Colors.textTertiary)
+
+            HStack(alignment: .center, spacing: 10) {
+                GMeterWidget(
+                    lateralG: motion.currentLateralG,
+                    longitudinalG: motion.currentLongitudinalG,
+                    trail: motion.trail
+                )
+                .frame(width: 72, height: 72)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(format: "%.2f g", abs(motion.currentLateralG)))
+                        .font(.system(size: 18, weight: .light, design: .default))
+                        .foregroundStyle(SQ5Colors.textPrimary)
+                        .monospacedDigit()
+                    Text("LATERAL")
+                        .font(.system(size: 8, weight: .semibold))
+                        .tracking(1.5)
+                        .foregroundStyle(SQ5Colors.textTertiary)
+                    Text(String(format: "%.2f g", abs(motion.currentLongitudinalG)))
+                        .font(.system(size: 18, weight: .light, design: .default))
+                        .foregroundStyle(SQ5Colors.textPrimary)
+                        .monospacedDigit()
+                        .padding(.top, 4)
+                    Text("LONGITUDINAL")
+                        .font(.system(size: 8, weight: .semibold))
+                        .tracking(1.5)
+                        .foregroundStyle(SQ5Colors.textTertiary)
+                }
+            }
+
+            // Same hairline fill bar as HeroStat so the column reads
+            // visually consistent with its neighbours. Driven by total
+            // horizontal magnitude scaled to 1.5G.
+            GeometryReader { geo in
+                let mag = sqrt(motion.currentLateralG * motion.currentLateralG
+                             + motion.currentLongitudinalG * motion.currentLongitudinalG)
+                let clamped = max(0, min(1, mag / 1.5))
+                let warn = clamped >= 0.6
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(SQ5Colors.border)
+                        .frame(height: 3)
+                    Capsule()
+                        .fill(warn ? SQ5Colors.accent : SQ5Colors.textPrimary)
+                        .frame(width: max(0, geo.size.width * clamped), height: 3)
                 }
             }
             .frame(height: 3)

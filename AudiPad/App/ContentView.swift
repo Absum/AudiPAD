@@ -25,6 +25,9 @@ struct ContentView: View {
     @StateObject private var alertAudio = AlertAudio()
     @StateObject private var signHistory = SignHistoryService()
     @StateObject private var racing = RacingService()
+    @StateObject private var motion = MotionService()
+
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         HStack(spacing: 0) {
@@ -83,11 +86,25 @@ struct ContentView: View {
         .environmentObject(roadLimits)
         .environmentObject(signHistory)
         .environmentObject(racing)
+        .environmentObject(motion)
+        .onChange(of: scenePhase) { phase in
+            // Pause CoreMotion when backgrounded — saves a small but
+            // steady chunk of CPU + battery on an iPad permanently
+            // mounted in the car.
+            switch phase {
+            case .active:                motion.start()
+            case .inactive, .background: motion.stop()
+            @unknown default:            break
+            }
+        }
         .background(SQ5Colors.background.ignoresSafeArea())
         .onAppear {
             // Kick the location stack — without this, GPS stays dormant and
             // every consumer below falls back to the simulated vehicle coord.
             locationService.requestPermission()
+            // scenePhase's onChange may not fire on initial launch since
+            // the value didn't transition — kick motion explicitly here.
+            motion.start()
             traffic.start(movingProvider: { [weak vehicle] in
                 guard let vehicle else { return false }
                 return vehicle.snapshot.speedKph > 5

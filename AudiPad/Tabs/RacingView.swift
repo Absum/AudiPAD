@@ -7,6 +7,7 @@ import SwiftUI
 struct RacingView: View {
     @EnvironmentObject private var racing: RacingService
     @EnvironmentObject private var vehicle: VehicleViewModel
+    @EnvironmentObject private var motion: MotionService
 
     @AppStorage(RacingService.topSpeedEnabledKey)
     private var topSpeedEnabled: Bool = RacingService.defaultTopSpeedEnabled
@@ -29,10 +30,89 @@ struct RacingView: View {
                 zeroToHundredSection
                 Hairline()
                 quarterMileSection
+                Hairline()
+                gForceSection
 
                 Spacer(minLength: 0)
             }
         }
+    }
+
+    // MARK: - G-Force
+
+    private var gForceSection: some View {
+        VStack(spacing: 0) {
+            RacingSectionLabel(
+                title: "G-Force",
+                subtitle: gForceSubtitle,
+                isOn: true,
+                onToggle: {},
+                onReset: hasGRecord ? { motion.resetPeaks() } : nil,
+                hideToggle: true,
+                extraTrailing: {
+                    AnyView(
+                        Button(action: { motion.calibrate() }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "scope")
+                                    .font(.system(size: 9, weight: .semibold))
+                                Text("CALIBRATE")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .tracking(1.8)
+                            }
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                        }
+                        .buttonStyle(.plain)
+                    )
+                }
+            )
+            HStack(alignment: .center, spacing: 0) {
+                GMeterWidget(
+                    lateralG: motion.currentLateralG,
+                    longitudinalG: motion.currentLongitudinalG,
+                    trail: motion.trail
+                )
+                .frame(width: 150, height: 150)
+                .padding(.leading, 30)
+                .padding(.vertical, 10)
+                KpiDivider()
+                RacingHero(
+                    label: "Peak Lateral",
+                    value: motion.peakLateralG > 0 ? String(format: "%.2f", motion.peakLateralG) : "—",
+                    unit: "g",
+                    enabled: true,
+                    accent: true,
+                    timestamp: nil
+                )
+                KpiDivider()
+                RacingHero(
+                    label: "Peak Long.",
+                    value: motion.peakLongitudinalG > 0 ? String(format: "%.2f", motion.peakLongitudinalG) : "—",
+                    unit: "g",
+                    enabled: true,
+                    accent: true,
+                    timestamp: nil
+                )
+                KpiDivider()
+                RacingHero(
+                    label: "Peak Combined",
+                    value: motion.peakCombinedG > 0 ? String(format: "%.2f", motion.peakCombinedG) : "—",
+                    unit: "g",
+                    enabled: true,
+                    accent: false,
+                    timestamp: nil
+                )
+            }
+        }
+    }
+
+    private var hasGRecord: Bool {
+        motion.peakLateralG > 0 || motion.peakLongitudinalG > 0 || motion.peakCombinedG > 0
+    }
+
+    private var gForceSubtitle: String {
+        let mag = sqrt(motion.currentLateralG * motion.currentLateralG
+                     + motion.currentLongitudinalG * motion.currentLongitudinalG)
+        return String(format: "Live · %.2f g", mag)
     }
 
     // MARK: - Top Speed
@@ -230,6 +310,12 @@ private struct RacingSectionLabel: View {
     let onToggle: () -> Void
     /// Nil hides the reset (no record to clear yet).
     let onReset: (() -> Void)?
+    /// `true` for sections without an on/off concept (e.g. G-force
+    /// is always running while the iPad is mounted).
+    var hideToggle: Bool = false
+    /// Optional trailing button shown left of the rocker — e.g. the
+    /// G-force section's Calibrate.
+    var extraTrailing: () -> AnyView = { AnyView(EmptyView()) }
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -247,6 +333,7 @@ private struct RacingSectionLabel: View {
                     .lineLimit(1)
             }
             Spacer()
+            extraTrailing()
             if let onReset {
                 Button(action: onReset) {
                     HStack(spacing: 4) {
@@ -260,7 +347,9 @@ private struct RacingSectionLabel: View {
                 }
                 .buttonStyle(.plain)
             }
-            ArmRocker(isOn: isOn, onToggle: onToggle)
+            if !hideToggle {
+                ArmRocker(isOn: isOn, onToggle: onToggle)
+            }
         }
         .padding(.horizontal, 26)
         .padding(.top, 12)
