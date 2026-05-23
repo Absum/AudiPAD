@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum AppTab: Hashable, CaseIterable {
-    case home, drive, map, media, settings
+    case home, drive, map, media, racing, settings
 
     var label: String {
         switch self {
@@ -9,6 +9,7 @@ enum AppTab: Hashable, CaseIterable {
         case .drive:    return "Drive"
         case .map:      return "Map"
         case .media:    return "Media"
+        case .racing:   return "Racing"
         case .settings: return "Setup"
         }
     }
@@ -19,6 +20,7 @@ enum AppTab: Hashable, CaseIterable {
         case .drive:    return "car.fill"
         case .map:      return "map.fill"
         case .media:    return "play.circle.fill"
+        case .racing:   return "flag.checkered"
         case .settings: return "gearshape.fill"
         }
     }

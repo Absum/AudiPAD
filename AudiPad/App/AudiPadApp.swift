@@ -59,6 +59,7 @@ private extension AppTab {
         case "drive":    self = .drive
         case "map":      self = .map
         case "media":    self = .media
+        case "racing":   self = .racing
         case "settings": self = .settings
         default: return nil
         }

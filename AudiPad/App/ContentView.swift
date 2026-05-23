@@ -24,6 +24,7 @@ struct ContentView: View {
     @StateObject private var roadLimits = RoadSpeedLimitService()
     @StateObject private var alertAudio = AlertAudio()
     @StateObject private var signHistory = SignHistoryService()
+    @StateObject private var racing = RacingService()
 
     var body: some View {
         HStack(spacing: 0) {
@@ -36,6 +37,7 @@ struct ContentView: View {
                 case .drive:    DriveView()
                 case .map:      MapTabView()
                 case .media:    MediaView()
+                case .racing:   RacingView()
                 case .settings: SettingsView()
                 }
             }
@@ -80,6 +82,7 @@ struct ContentView: View {
         .environmentObject(cameras)
         .environmentObject(roadLimits)
         .environmentObject(signHistory)
+        .environmentObject(racing)
         .background(SQ5Colors.background.ignoresSafeArea())
         .onAppear {
             // Kick the location stack — without this, GPS stays dormant and
@@ -128,6 +131,10 @@ struct ContentView: View {
                            linkID: { [roadLimits] coord, course in
                                roadLimits.linkID(snappedNear: coord, course: course)
                            })
+            // Racing trackers run continuously while their toggles are
+            // on, regardless of which tab is on screen — the user can
+            // enable Top Speed once and have it record on any drive.
+            racing.applyLocation(loc)
         }
         .onReceive(cameraService.$cameras) { latest in
             guard let loc = locationService.location else { return }
