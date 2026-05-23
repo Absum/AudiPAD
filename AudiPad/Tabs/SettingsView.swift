@@ -297,7 +297,7 @@ struct SettingsView: View {
 
                 // Loop length stepper — user-configurable in 5-min
                 // steps from 5 to 240 min.
-                HStack {
+                HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Loop length")
                             .font(SQ5Typography.body)
@@ -307,17 +307,22 @@ struct SettingsView: View {
                             .foregroundStyle(SQ5Colors.textTertiary)
                     }
                     Spacer()
-                    Stepper(value: $dashcamLoopMinutesPref,
+                    // Value text lives outside the Stepper so
+                    // labelsHidden() doesn't make it vanish (which
+                    // is what made the +/- buttons look broken in
+                    // 2de45a3 — they worked, you just couldn't see
+                    // the number change).
+                    Text("\(dashcamLoopMinutesPref) min")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(SQ5Colors.textPrimary)
+                        .monospacedDigit()
+                        .frame(minWidth: 60, alignment: .trailing)
+                    Stepper("", value: $dashcamLoopMinutesPref,
                             in: DashcamService.loopMinutesRange,
-                            step: DashcamService.loopMinutesStep) {
-                        Text("\(dashcamLoopMinutesPref) min")
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(SQ5Colors.textPrimary)
-                            .monospacedDigit()
-                            .frame(minWidth: 70, alignment: .trailing)
-                    }
-                    .labelsHidden()
-                    .tint(SQ5Colors.accent)
+                            step: DashcamService.loopMinutesStep)
+                        .labelsHidden()
+                        .tint(SQ5Colors.accent)
+                        .fixedSize()
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 14)
