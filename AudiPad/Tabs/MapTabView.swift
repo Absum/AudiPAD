@@ -580,6 +580,14 @@ final class MapController: ObservableObject {
     /// forward of the user in heading-up follow).
     private var targetCarCoord: CLLocationCoordinate2D?
 
+    /// User's last-known motion vector — captured from the most
+    /// recent `applyLocationUpdate` and used by `smoothingTick` to
+    /// dead-reckon the target forward between GPS fixes so the
+    /// camera keeps gliding continuously instead of pausing every
+    /// time it converges to a stale target.
+    private var lastKnownSpeedMS: Double = 0
+    private var lastKnownCourseDeg: Double?
+
     /// CADisplayLink running while the map tab is on screen.
     private var displayLink: CADisplayLink?
     /// Non-isolated proxy so CADisplayLink doesn't retain `self`
@@ -789,6 +797,17 @@ final class MapController: ObservableObject {
         targetCenter = newCenter
         targetHeading = newHeading
         targetCarCoord = trackedCoord
+
+        // Snapshot the motion vector so the smoothing loop can
+        // dead-reckon the target forward between GPS fixes. Without
+        // this the camera glides for ~500 ms after each fix, then
+        // sits still until the next one arrives — pulse-pause-pulse.
+        // With extrapolation the target keeps moving at the user's
+        // actual speed and the camera tracks it continuously.
+        lastKnownSpeedMS = max(0, location.speed)
+        if location.course >= 0 {
+            lastKnownCourseDeg = location.course
+        }
     }
 
     // MARK: - Smoothing loop
@@ -822,7 +841,26 @@ final class MapController: ObservableObject {
     /// latest `target*` state at an exponential rate.
     fileprivate func smoothingTick(deltaSeconds: TimeInterval) {
         guard let map = mapView else { return }
-        guard let targetCenter, let targetCarCoord else { return }
+        guard var targetCenter = self.targetCenter,
+              var targetCarCoord = self.targetCarCoord else { return }
+
+        // Dead-reckon — advance the target along the user's last-known
+        // motion vector before interpolating. Without this the camera
+        // catches the GPS-derived target in ~500 ms and then sits
+        // still until the next 1 Hz fix arrives, producing the
+        // pulse-pause-pulse feel. With extrapolation the target keeps
+        // moving at the user's actual speed and the camera tracks it
+        // continuously; the next GPS fix is a small correction
+        // instead of the only motion driver. Skipped when parked
+        // (sub-1 m/s) to avoid drifting the camera around a stopped car.
+        if lastKnownSpeedMS > 1, let courseDeg = lastKnownCourseDeg {
+            let stepMeters = lastKnownSpeedMS * deltaSeconds
+            targetCenter   = Self.advance(targetCenter,   meters: stepMeters, courseDeg: courseDeg)
+            targetCarCoord = Self.advance(targetCarCoord, meters: stepMeters, courseDeg: courseDeg)
+            self.targetCenter   = targetCenter
+            self.targetCarCoord = targetCarCoord
+        }
+
         // Convert per-second convergence into per-frame alpha. Stable
         // across frame-rate jitter because we use the actual delta.
         let alpha = 1 - exp(-Self.smoothingConvergenceRate * deltaSeconds)
@@ -908,6 +946,23 @@ final class MapController: ObservableObject {
         // delta is signed shortest-arc difference from a to b.
         let result = (a + delta * alpha).truncatingRemainder(dividingBy: 360)
         return result < 0 ? result + 360 : result
+    }
+
+    /// Move `coord` forward by `meters` along compass bearing
+    /// `courseDeg` (0 = north, clockwise). Local flat-earth math —
+    /// over per-frame step sizes (sub-meter at any realistic speed)
+    /// the error vs great-circle is below GPS noise.
+    private static func advance(_ coord: CLLocationCoordinate2D,
+                                meters: Double,
+                                courseDeg: Double) -> CLLocationCoordinate2D {
+        let mPerLat = 111_320.0
+        let mPerLon = 111_320.0 * cos(coord.latitude * .pi / 180)
+        let rad = courseDeg * .pi / 180
+        // Compass: 0° = north (+lat), 90° = east (+lon).
+        let dLat = (meters * cos(rad)) / mPerLat
+        let dLon = (meters * sin(rad)) / max(mPerLon, 1)
+        return CLLocationCoordinate2D(latitude:  coord.latitude  + dLat,
+                                      longitude: coord.longitude + dLon)
     }
 
     /// Signed shortest-arc difference between two bearings (degrees).
@@ -1023,10 +1078,16 @@ final class MapController: ObservableObject {
     }
 }
 
-/// Bridges `CADisplayLink` (non-isolated, Obj-C selector) to the
-/// MainActor-isolated `MapController.smoothingTick`. CADisplayLink
-/// retains its target strongly; using a separate proxy with a weak
-/// ref to the controller prevents a retain cycle.
+/// Bridges `CADisplayLink` (Obj-C selector) to MapController. The
+/// proxy is `@MainActor` so the @objc tick can call straight into
+/// `controller.smoothingTick` without a `Task` hop — CADisplayLink
+/// fires on the main thread, which is the MainActor's thread, so
+/// the isolation invariant already holds. Skipping the hop saves
+/// a runloop iteration of latency per frame.
+/// CADisplayLink retains its target strongly; we keep the controller
+/// weak here so the link doesn't accidentally extend the controller's
+/// lifetime.
+@MainActor
 private final class SmoothingProxy: NSObject {
     private weak var controller: MapController?
 
@@ -1035,16 +1096,8 @@ private final class SmoothingProxy: NSObject {
         super.init()
     }
 
-    /// CADisplayLink fires this on the main thread. Hop into the
-    /// MainActor explicitly so the compiler is happy on iOS 16 (which
-    /// doesn't have `MainActor.assumeIsolated`). The 1-runloop hop
-    /// adds a frame of latency at most — invisible at 60 Hz.
     @objc func tick(_ link: CADisplayLink) {
-        let delta = link.duration
-        guard let controller else { return }
-        Task { @MainActor in
-            controller.smoothingTick(deltaSeconds: delta)
-        }
+        controller?.smoothingTick(deltaSeconds: link.duration)
     }
 }
 
