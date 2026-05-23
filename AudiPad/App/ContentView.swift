@@ -26,6 +26,7 @@ struct ContentView: View {
     @StateObject private var signHistory = SignHistoryService()
     @StateObject private var racing = RacingService()
     @StateObject private var motion = MotionService()
+    @StateObject private var lapTimer = LapTimerService()
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -87,6 +88,7 @@ struct ContentView: View {
         .environmentObject(signHistory)
         .environmentObject(racing)
         .environmentObject(motion)
+        .environmentObject(lapTimer)
         .onChange(of: scenePhase) { phase in
             // Pause CoreMotion when backgrounded — saves a small but
             // steady chunk of CPU + battery on an iPad permanently
@@ -152,6 +154,9 @@ struct ContentView: View {
             // on, regardless of which tab is on screen — the user can
             // enable Top Speed once and have it record on any drive.
             racing.applyLocation(loc)
+            // Lap timer only does work when a start-finish line has
+            // been dropped; checks itself.
+            lapTimer.applyLocation(loc)
         }
         .onReceive(cameraService.$cameras) { latest in
             guard let loc = locationService.location else { return }
