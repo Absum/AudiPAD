@@ -346,6 +346,10 @@ struct SettingsView: View {
                 ZStack {
                     if dashcam.isShowingPreview {
                         DashcamPreviewView(session: dashcam.session)
+                        // Mirror of the burned-in overlay — same
+                        // data, same layout, so what the user sees
+                        // here is what ends up in the recorded file.
+                        DashcamOverlayPreview()
                     } else {
                         Rectangle()
                             .fill(SQ5Colors.background)

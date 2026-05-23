@@ -49,6 +49,13 @@ targets:
         UIRequiresFullScreen: true
         UIStatusBarHidden: true
         UIViewControllerBasedStatusBarAppearance: false
+        # Expose the app's Documents folder in iOS Files app so the
+        # user can browse / AirDrop / share dashcam recordings (and
+        # any future user-visible exports) without an in-app picker.
+        # Folder shows up as "On My iPad → AudiPad" once at least
+        # one file exists in Documents/.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         UILaunchScreen:
           UIColorName: LaunchBackground
         UISupportedInterfaceOrientations:
