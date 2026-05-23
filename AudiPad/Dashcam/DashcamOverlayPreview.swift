@@ -39,59 +39,74 @@ struct DashcamOverlayPreview: View {
 
     private func topStrip(state: DashcamOverlayRenderer.State,
                           in size: CGSize) -> some View {
-        let height = size.height * 0.13
+        let titleSize = size.height * 0.05
         return HStack {
-            Text("AUDI · SQ5")
-                .font(.system(size: height * 0.4, weight: .heavy))
-                .tracking(2)
+            Text("AUDI SQ5")
+                .font(.system(size: titleSize, weight: .heavy))
+                .tracking(1.2)
                 .foregroundStyle(.white)
             Spacer()
             Text(clockFormatter.string(from: state.date))
-                .font(.system(size: height * 0.4, weight: .semibold).monospacedDigit())
+                .font(.system(size: titleSize, weight: .semibold).monospacedDigit())
                 .foregroundStyle(.white)
         }
-        .padding(.horizontal, height * 0.5)
-        .frame(height: height)
+        .padding(.horizontal, titleSize)
+        .padding(.vertical, titleSize * 0.35)
         .frame(maxWidth: .infinity)
         .background(Color.black.opacity(0.55))
     }
 
     private func bottomStrip(state: DashcamOverlayRenderer.State,
                              in size: CGSize) -> some View {
-        let height = size.height * 0.22
-        return HStack(alignment: .top, spacing: 0) {
-            overlayCell(label: "SPEED",
-                        value: state.speedKph.map { String(format: "%.0f km/h", $0) } ?? "—",
-                        height: height)
-            overlayCell(label: "ROAD",
-                        value: roadDisplay(state),
-                        height: height)
-            overlayCell(label: "G-FORCE",
-                        value: gForceDisplay(state),
-                        height: height)
-            overlayCell(label: "GPS",
-                        value: gpsDisplay(state),
-                        height: height)
+        // Body row ≈ 2/3 of the top-title size, one-liner format
+        // ("SPEED 87 km/h  ·  ROAD …  ·  G-FORCE …  ·  GPS …").
+        let bodySize = size.height * 0.033
+        let labelColor = Color.white.opacity(0.6)
+        let sepColor = Color.white.opacity(0.35)
+        return HStack(spacing: 0) {
+            inlinePair(label: "SPEED",
+                       value: state.speedKph.map { String(format: "%.0f km/h", $0) } ?? "—",
+                       size: bodySize, labelColor: labelColor)
+            inlineSeparator(size: bodySize, color: sepColor)
+            inlinePair(label: "ROAD",
+                       value: roadDisplay(state),
+                       size: bodySize, labelColor: labelColor)
+            inlineSeparator(size: bodySize, color: sepColor)
+            inlinePair(label: "G-FORCE",
+                       value: gForceDisplay(state),
+                       size: bodySize, labelColor: labelColor)
+            inlineSeparator(size: bodySize, color: sepColor)
+            inlinePair(label: "GPS",
+                       value: gpsDisplay(state),
+                       size: bodySize, labelColor: labelColor)
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, height * 0.3)
-        .padding(.vertical, height * 0.18)
+        .padding(.horizontal, bodySize * 1.5)
+        .padding(.vertical, bodySize * 0.5)
         .frame(maxWidth: .infinity)
         .background(Color.black.opacity(0.55))
+        .lineLimit(1)
     }
 
-    private func overlayCell(label: String, value: String, height: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+    private func inlinePair(label: String, value: String, size: CGFloat,
+                            labelColor: Color) -> some View {
+        HStack(spacing: size * 0.35) {
             Text(label)
-                .font(.system(size: height * 0.16, weight: .heavy))
-                .tracking(1.4)
-                .foregroundStyle(.white.opacity(0.7))
+                .font(.system(size: size, weight: .heavy))
+                .tracking(1.2)
+                .foregroundStyle(labelColor)
             Text(value)
-                .font(.system(size: height * 0.42, weight: .semibold).monospacedDigit())
+                .font(.system(size: size, weight: .semibold).monospacedDigit())
                 .foregroundStyle(.white)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .lineLimit(1)
+    }
+
+    private func inlineSeparator(size: CGFloat, color: Color) -> some View {
+        Text("·")
+            .font(.system(size: size, weight: .regular))
+            .foregroundStyle(color)
+            .padding(.horizontal, size * 0.6)
     }
 
     // MARK: - Helpers (mirror DashcamOverlayRenderer's formatting)

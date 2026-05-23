@@ -94,19 +94,21 @@ final class DashcamOverlayRenderer {
     }
 
     private func drawTopStrip(in ctx: CGContext, state: State) {
-        let stripHeight = size.height * 0.07
+        // Title-row font size derived from frame height — kept
+        // small so the overlay reads as an info strip, not chrome
+        // that competes with the road footage.
+        let titleFont = UIFont.systemFont(ofSize: size.height * 0.025, weight: .semibold)
+        let stripHeight = titleFont.lineHeight + size.height * 0.012
         let rect = CGRect(x: 0, y: 0, width: size.width, height: stripHeight)
         UIColor.black.withAlphaComponent(0.55).setFill()
         ctx.fill(rect)
 
-        // SQ5 mark on the left — text-only fallback if the asset
-        // isn't bundled. Kept small so it doesn't dominate.
-        let logoText = "AUDI · SQ5"
-        let logoFont = UIFont.systemFont(ofSize: stripHeight * 0.55, weight: .heavy)
+        // Wordmark on the left — no separator dot (user feedback).
+        let logoText = "AUDI SQ5"
         let logoAttrs: [NSAttributedString.Key: Any] = [
-            .font: logoFont,
+            .font: UIFont.systemFont(ofSize: titleFont.pointSize, weight: .heavy),
             .foregroundColor: UIColor.white,
-            .kern: 2.0,
+            .kern: 1.2,
         ]
         let logoSize = (logoText as NSString).size(withAttributes: logoAttrs)
         (logoText as NSString).draw(
@@ -115,11 +117,10 @@ final class DashcamOverlayRenderer {
             withAttributes: logoAttrs
         )
 
-        // Date · clock on the right.
+        // Finnish date + clock on the right (d.M.yyyy HH:mm:ss).
         let clockText = Self.clockFormatter.string(from: state.date)
-        let clockFont = UIFont.monospacedDigitSystemFont(ofSize: stripHeight * 0.55, weight: .semibold)
         let clockAttrs: [NSAttributedString.Key: Any] = [
-            .font: clockFont,
+            .font: UIFont.monospacedDigitSystemFont(ofSize: titleFont.pointSize, weight: .semibold),
             .foregroundColor: UIColor.white,
         ]
         let clockSize = (clockText as NSString).size(withAttributes: clockAttrs)
@@ -131,7 +132,10 @@ final class DashcamOverlayRenderer {
     }
 
     private func drawBottomStrip(in ctx: CGContext, state: State) {
-        let stripHeight = size.height * 0.12
+        // Bottom-row font ≈ 2/3 of the top-row title (user feedback).
+        let bodyFontSize = size.height * 0.017
+        let bodyFont = UIFont.systemFont(ofSize: bodyFontSize, weight: .semibold)
+        let stripHeight = bodyFont.lineHeight + size.height * 0.010
         let rect = CGRect(x: 0,
                           y: size.height - stripHeight,
                           width: size.width,
@@ -139,46 +143,49 @@ final class DashcamOverlayRenderer {
         UIColor.black.withAlphaComponent(0.55).setFill()
         ctx.fill(rect)
 
-        let pad = stripHeight * 0.25
-        let topPad = stripHeight * 0.18
-        let labelFont = UIFont.systemFont(ofSize: stripHeight * 0.16, weight: .heavy)
+        // Build the inline NSAttributedString:
+        // "SPEED " (muted) "87 km/h" (white) "  ·  " (muted) …
         let labelAttrs: [NSAttributedString.Key: Any] = [
-            .font: labelFont,
-            .foregroundColor: UIColor.white.withAlphaComponent(0.7),
-            .kern: 1.4,
+            .font: UIFont.systemFont(ofSize: bodyFontSize, weight: .heavy),
+            .foregroundColor: UIColor.white.withAlphaComponent(0.6),
+            .kern: 1.2,
         ]
-        let valueFont = UIFont.monospacedDigitSystemFont(ofSize: stripHeight * 0.42, weight: .semibold)
         let valueAttrs: [NSAttributedString.Key: Any] = [
-            .font: valueFont,
+            .font: UIFont.monospacedDigitSystemFont(ofSize: bodyFontSize, weight: .semibold),
             .foregroundColor: UIColor.white,
         ]
+        let separatorAttrs: [NSAttributedString.Key: Any] = [
+            .font: bodyFont,
+            .foregroundColor: UIColor.white.withAlphaComponent(0.35),
+        ]
 
-        // Four columns, evenly spaced.
-        let colWidth = (size.width - pad * 2) / 4
         let columns: [(String, String)] = [
             ("SPEED",   state.speedKph.map { String(format: "%.0f km/h", $0) } ?? "—"),
             ("ROAD",    Self.roadDisplay(state: state)),
             ("G-FORCE", Self.gforceDisplay(state: state)),
             ("GPS",     Self.gpsDisplay(state: state)),
         ]
+        let line = NSMutableAttributedString()
         for (i, (label, value)) in columns.enumerated() {
-            let x = pad + colWidth * CGFloat(i)
-            (label as NSString).draw(
-                at: CGPoint(x: x, y: rect.minY + topPad),
-                withAttributes: labelAttrs
-            )
-            (value as NSString).draw(
-                at: CGPoint(x: x, y: rect.minY + topPad + labelFont.lineHeight + 2),
-                withAttributes: valueAttrs
-            )
+            if i > 0 {
+                line.append(NSAttributedString(string: "   ·   ", attributes: separatorAttrs))
+            }
+            line.append(NSAttributedString(string: "\(label) ", attributes: labelAttrs))
+            line.append(NSAttributedString(string: value, attributes: valueAttrs))
         }
+        let lineSize = line.size()
+        line.draw(at: CGPoint(
+            x: stripHeight * 0.5,
+            y: rect.minY + (stripHeight - lineSize.height) / 2
+        ))
     }
 
     // MARK: - Formatters
 
     private static let clockFormatter: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd  HH:mm:ss"
+        f.locale = Locale(identifier: "fi_FI")
+        f.dateFormat = "d.M.yyyy HH:mm:ss"
         return f
     }()
 
