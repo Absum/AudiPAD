@@ -43,15 +43,30 @@ final class DashcamService: NSObject, ObservableObject {
     static let loopMinutesKey        = "audipad.dashcam.loopMinutes"
     static let audioEnabledKey       = "audipad.dashcam.audioEnabled"
     static let saveDurationSecondsKey = "audipad.dashcam.saveDurationSeconds"
+    /// Region-of-interest (ROI) used to crop the recorded area —
+    /// stored as zoom + offset fractions so the actual ROI rect is
+    /// derived (clamped) per query. Zoom 1.0 = full frame; offsets
+    /// in (-0.5, +0.5) shift the centered ROI before clamping.
+    static let cropZoomKey           = "audipad.dashcam.cropZoom"
+    static let cropOffsetXKey        = "audipad.dashcam.cropOffsetX"
+    static let cropOffsetYKey        = "audipad.dashcam.cropOffsetY"
 
     static let defaultEnabled              = false
     static let defaultSegmentSeconds       = 60
     static let defaultLoopMinutes          = 30
     static let defaultAudioEnabled         = true
     static let defaultSaveDurationSeconds  = 30
+    static let defaultCropZoom             = 1.0
+    static let defaultCropOffset           = 0.0
 
     static let allowedSegmentSeconds      = [30, 60, 120]
     static let allowedSaveDurationSeconds = [15, 30, 60, 120]
+
+    /// Zoom slider bounds. 3× zoom means the recorded area is 1/3
+    /// of source by each dimension, ~1/9th of the area — plenty for
+    /// excluding A-pillar / dashboard intrusion.
+    static let cropZoomRange: ClosedRange<Double> = 1.0...3.0
+    static let cropZoomStep: Double = 0.05
 
     /// Loop-length bounds for the Settings Stepper. 5 min is the
     /// shortest sensible cap (loses incidents quickly); 240 min is
@@ -114,6 +129,40 @@ final class DashcamService: NSObject, ObservableObject {
         pipeline.onSegmentFinished = { [weak self] url in
             Task { @MainActor in self?.handleSegmentFinished(url: url) }
         }
+        // Push the initial crop ROI so the first segment + preview
+        // reflect persisted prefs from a previous session.
+        pipeline.updateConfig { $0.normalizedROI = self.normalizedROI() }
+    }
+
+    /// Compute the persisted ROI as a CGRect in [0,1] unit space
+    /// (top-left origin). Zoom + offsets pulled from UserDefaults,
+    /// offsets clamped so the ROI stays inside [0,1]² on both axes.
+    func normalizedROI() -> CGRect {
+        let d = UserDefaults.standard
+        let rawZoom = (d.object(forKey: Self.cropZoomKey) as? Double) ?? Self.defaultCropZoom
+        let zoom = min(max(rawZoom, Self.cropZoomRange.lowerBound),
+                       Self.cropZoomRange.upperBound)
+        let halfSize = 0.5 / zoom
+        let rawOffX = (d.object(forKey: Self.cropOffsetXKey) as? Double) ?? 0
+        let rawOffY = (d.object(forKey: Self.cropOffsetYKey) as? Double) ?? 0
+        // Clamp center coords so ROI stays inside the source.
+        let centerX = min(max(0.5 + rawOffX, halfSize), 1 - halfSize)
+        let centerY = min(max(0.5 + rawOffY, halfSize), 1 - halfSize)
+        return CGRect(x: centerX - halfSize,
+                      y: centerY - halfSize,
+                      width: 2 * halfSize,
+                      height: 2 * halfSize)
+    }
+
+    /// Called by the Settings sliders whenever any of zoom / offsetX
+    /// / offsetY changes. Pushes the fresh ROI into the pipeline so
+    /// the next segment writer uses the new crop dimensions. The
+    /// preview layer reads `normalizedROI()` independently for its
+    /// `contentsRect` so the preview reflects changes instantly.
+    func cropConfigChanged() {
+        let roi = normalizedROI()
+        pipeline.updateConfig { $0.normalizedROI = roi }
+        objectWillChange.send()
     }
 
     // MARK: - Public API

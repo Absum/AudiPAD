@@ -9,13 +9,19 @@ import UIKit
 /// user wants to verify framing).
 struct DashcamPreviewView: UIViewRepresentable {
     let session: AVCaptureSession
+    /// Normalized ROI rect in top-left unit space — same convention
+    /// as `DashcamService.normalizedROI()`. Identity = full frame.
+    /// When the user adjusts crop sliders, the parent re-renders
+    /// with a new roi and the layer's `contentsRect` follows.
+    var roi: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
 
     func makeUIView(context: Context) -> PreviewContainer {
         let v = PreviewContainer()
         v.backgroundColor = .black
         v.previewLayer.session = session
-        v.previewLayer.videoGravity = .resizeAspect
+        v.previewLayer.videoGravity = .resizeAspectFill
         applyOrientation(to: v.previewLayer)
+        applyROI(to: v.previewLayer)
         return v
     }
 
@@ -28,6 +34,21 @@ struct DashcamPreviewView: UIViewRepresentable {
         // Re-apply on every update so a device-rotation between
         // LandscapeLeft and LandscapeRight is picked up immediately.
         applyOrientation(to: uiView.previewLayer)
+        applyROI(to: uiView.previewLayer)
+    }
+
+    /// Crop the preview layer's content to the current ROI using
+    /// CALayer.contentsRect. Avoids running the actual AVCapture
+    /// crop path twice — we let MapKit / GPU show only the ROI
+    /// region scaled to fill the layer, matching what the writer
+    /// is producing to disk.
+    private func applyROI(to layer: AVCaptureVideoPreviewLayer) {
+        // Note: `contentsRect` uses (0,0) at top-left in unit space,
+        // matching our ROI convention exactly.
+        let target = roi
+        if layer.contentsRect != target {
+            layer.contentsRect = target
+        }
     }
 
     /// Sync the preview-layer connection to the active scene's

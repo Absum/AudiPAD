@@ -20,6 +20,9 @@ struct SettingsView: View {
     @AppStorage(DashcamService.loopMinutesKey)        private var dashcamLoopMinutesPref: Int = DashcamService.defaultLoopMinutes
     @AppStorage(DashcamService.audioEnabledKey)       private var dashcamAudioEnabled: Bool = DashcamService.defaultAudioEnabled
     @AppStorage(DashcamService.saveDurationSecondsKey) private var dashcamSaveDurationSeconds: Int = DashcamService.defaultSaveDurationSeconds
+    @AppStorage(DashcamService.cropZoomKey)           private var dashcamCropZoom: Double = DashcamService.defaultCropZoom
+    @AppStorage(DashcamService.cropOffsetXKey)        private var dashcamCropOffsetX: Double = DashcamService.defaultCropOffset
+    @AppStorage(DashcamService.cropOffsetYKey)        private var dashcamCropOffsetY: Double = DashcamService.defaultCropOffset
 
     @EnvironmentObject private var dashcam: DashcamService
 
@@ -345,7 +348,8 @@ struct SettingsView: View {
                 // on screen.
                 ZStack {
                     if dashcam.isShowingPreview {
-                        DashcamPreviewView(session: dashcam.session)
+                        DashcamPreviewView(session: dashcam.session,
+                                           roi: dashcam.normalizedROI())
                         // Mirror of the burned-in overlay — same
                         // data, same layout, so what the user sees
                         // here is what ends up in the recorded file.
@@ -374,6 +378,66 @@ struct SettingsView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 14)
 
+                Divider().background(SQ5Colors.border)
+
+                // Recording area — zoom + pan sliders. Live-update
+                // the preview's contentsRect; pipeline picks up the
+                // new dimensions on next segment rotation.
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Recording area")
+                                .font(SQ5Typography.body)
+                                .foregroundStyle(SQ5Colors.textPrimary)
+                            Text("Zoom in to exclude dashboard / A-pillar from the recorded video.")
+                                .font(SQ5Typography.caption)
+                                .foregroundStyle(SQ5Colors.textTertiary)
+                        }
+                        Spacer()
+                        Button(action: {
+                            dashcamCropZoom = DashcamService.defaultCropZoom
+                            dashcamCropOffsetX = DashcamService.defaultCropOffset
+                            dashcamCropOffsetY = DashcamService.defaultCropOffset
+                            dashcam.cropConfigChanged()
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.counterclockwise")
+                                    .font(.system(size: 9, weight: .semibold))
+                                Text("RESET")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .tracking(1.8)
+                            }
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    CropSliderRow(
+                        label: "Zoom",
+                        value: $dashcamCropZoom,
+                        range: DashcamService.cropZoomRange,
+                        step: DashcamService.cropZoomStep,
+                        formatter: { String(format: "%.2fx", $0) }
+                    )
+                    .onChange(of: dashcamCropZoom) { _ in dashcam.cropConfigChanged() }
+                    CropSliderRow(
+                        label: "Pan X",
+                        value: $dashcamCropOffsetX,
+                        range: -0.5...0.5,
+                        step: 0.02,
+                        formatter: { String(format: "%+.2f", $0) }
+                    )
+                    .onChange(of: dashcamCropOffsetX) { _ in dashcam.cropConfigChanged() }
+                    CropSliderRow(
+                        label: "Pan Y",
+                        value: $dashcamCropOffsetY,
+                        range: -0.5...0.5,
+                        step: 0.02,
+                        formatter: { String(format: "%+.2f", $0) }
+                    )
+                    .onChange(of: dashcamCropOffsetY) { _ in dashcam.cropConfigChanged() }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
                 Divider().background(SQ5Colors.border)
 
                 // Master enable
@@ -816,6 +880,34 @@ private struct DashcamSegmentRow: View {
     private static func size(_ bytes: Int64) -> String {
         let mb = Double(bytes) / 1_048_576
         return String(format: "%.1f MB", mb)
+    }
+}
+
+/// Label + slider + numeric readout row used by the dashcam crop
+/// controls. Three rows side-by-side would be too cramped on the
+/// 9.7" iPad — vertical stack keeps each slider full-width.
+private struct CropSliderRow: View {
+    let label: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    let formatter: (Double) -> String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(label.uppercased())
+                .font(.system(size: 10, weight: .heavy, design: .monospaced))
+                .tracking(1.6)
+                .foregroundStyle(SQ5Colors.textTertiary)
+                .frame(width: 56, alignment: .leading)
+            Slider(value: $value, in: range, step: step)
+                .tint(SQ5Colors.accent)
+            Text(formatter(value))
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(SQ5Colors.textPrimary)
+                .monospacedDigit()
+                .frame(width: 60, alignment: .trailing)
+        }
     }
 }
 

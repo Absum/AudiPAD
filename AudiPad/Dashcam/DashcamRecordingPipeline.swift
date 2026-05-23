@@ -39,6 +39,11 @@ final class DashcamRecordingPipeline: NSObject,
         var segmentSeconds: Int
         var segmentsDir: URL?
         var enabled: Bool
+        /// Region-of-interest as a normalized rect in source-frame
+        /// unit space (top-left origin). Default = full frame.
+        /// Changes take effect on the next segment rotation since
+        /// AVAssetWriter dimensions are fixed at writer-create.
+        var normalizedROI: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
     }
 
     /// Called from the pipeline (on sample-buffer queue) when a
@@ -116,18 +121,38 @@ final class DashcamRecordingPipeline: NSObject,
                               segmentSeconds: Int) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        let size = CGSize(width: width, height: height)
+        let sourceWidth = CVPixelBufferGetWidth(pixelBuffer)
+        let sourceHeight = CVPixelBufferGetHeight(pixelBuffer)
+        let sourceSize = CGSize(width: sourceWidth, height: sourceHeight)
 
-        // First frame — lock in video size and create the overlay
-        // renderer to match. Subsequent size changes (orientation
-        // flip mid-recording) will cause the renderer to draw at
-        // wrong coords; rotation handling above + matching the
-        // session's video connection orientation prevents that.
-        if videoSize != size {
-            videoSize = size
-            overlayRenderer = DashcamOverlayRenderer(size: size)
+        // ROI in pixel space (CIImage uses bottom-left origin so
+        // the Y coord is flipped from the unit-space top-left we
+        // store in RecordingConfig).
+        let roiUnit = currentConfig().normalizedROI
+        let cropRect = CGRect(
+            x: roiUnit.minX * sourceSize.width,
+            y: (1 - roiUnit.maxY) * sourceSize.height,
+            width: roiUnit.width * sourceSize.width,
+            height: roiUnit.height * sourceSize.height
+        ).integral
+        let outputSize = cropRect.size
+
+        // First frame at this output size — refresh the overlay
+        // renderer + force a writer rotation so the new writer is
+        // sized to match the cropped output.
+        if videoSize != outputSize {
+            videoSize = outputSize
+            overlayRenderer = DashcamOverlayRenderer(size: outputSize)
+            // Drop the existing writer — its video dimensions are
+            // locked at create time and don't match the new crop.
+            // Detached finish keeps the sample queue moving.
+            if let outgoing = currentWriter {
+                currentWriter = nil
+                Task.detached { [outgoing, onSegmentFinished] in
+                    await outgoing.finish()
+                    onSegmentFinished?(outgoing.url)
+                }
+            }
         }
 
         // Rotation check — if we've crossed segmentSeconds since the
@@ -142,7 +167,7 @@ final class DashcamRecordingPipeline: NSObject,
 
         if needRotation {
             rotateWriter(segmentsDir: segmentsDir,
-                         videoSize: size,
+                         videoSize: outputSize,
                          startAt: pts)
             rotationRequested = false
         }
@@ -150,23 +175,36 @@ final class DashcamRecordingPipeline: NSObject,
         guard let writer = currentWriter else { return }
         writer.startSessionIfNeeded(at: pts)
 
-        // Composite overlay onto frame.
+        // Crop the source frame, then composite overlay.
         let sourceCI = CIImage(cvPixelBuffer: pixelBuffer)
+        // CIImage cropped(to:) clips the visible region but keeps
+        // the original extent's origin — translate so the cropped
+        // image's origin lands at (0,0) for the output buffer.
+        let croppedCI = sourceCI
+            .cropped(to: cropRect)
+            .transformed(by: CGAffineTransform(translationX: -cropRect.minX,
+                                               y: -cropRect.minY))
+
         let state = stateLock.withLock { $0 }
         let composited: CIImage
         if let renderer = overlayRenderer,
            let overlay = renderer.image(for: state) {
+            // Overlay was rendered with origin top-left at output
+            // size (UIGraphicsImageRenderer convention). CIImage
+            // converts it to bottom-left origin automatically.
             let overlayCI = CIImage(cgImage: overlay)
-            composited = overlayCI.composited(over: sourceCI)
+            composited = overlayCI.composited(over: croppedCI)
         } else {
-            composited = sourceCI
+            composited = croppedCI
         }
 
-        // Render the composite into an output pixel buffer. Allocate
-        // per-frame for now (pool optimisation possible later).
+        // Render the composite into an output pixel buffer at the
+        // cropped dimensions. Allocate per-frame (pool optimisation
+        // possible later).
         var outBuffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(kCFAllocatorDefault,
-                                         width, height,
+                                         Int(outputSize.width),
+                                         Int(outputSize.height),
                                          kCVPixelFormatType_32BGRA,
                                          bufferAttributes as CFDictionary,
                                          &outBuffer)
@@ -174,7 +212,7 @@ final class DashcamRecordingPipeline: NSObject,
 
         ciContext.render(composited,
                          to: outBuffer,
-                         bounds: composited.extent,
+                         bounds: CGRect(origin: .zero, size: outputSize),
                          colorSpace: CGColorSpaceCreateDeviceRGB())
 
         writer.append(pixelBuffer: outBuffer, at: pts)
