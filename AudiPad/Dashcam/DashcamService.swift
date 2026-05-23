@@ -32,19 +32,33 @@ final class DashcamService: NSObject, ObservableObject {
     @Published private(set) var segments: [DashcamSegment] = []
     @Published private(set) var totalStorageBytes: Int64 = 0
 
+    /// Timestamp + duration of the most-recent SAVE-LAST-N press, so
+    /// the TopBar can flash a "SAVED Xs" pill briefly after. Nil
+    /// when no save has happened yet (or the pill has expired).
+    @Published private(set) var lastSaveAcknowledged: (at: Date, seconds: Int)?
+
     /// User preferences (mirrored via @AppStorage in the UI).
-    static let enabledKey       = "audipad.dashcam.enabled"
-    static let segmentSecondsKey = "audipad.dashcam.segmentSeconds"
-    static let maxSegmentsKey   = "audipad.dashcam.maxSegments"
-    static let audioEnabledKey  = "audipad.dashcam.audioEnabled"
+    static let enabledKey            = "audipad.dashcam.enabled"
+    static let segmentSecondsKey     = "audipad.dashcam.segmentSeconds"
+    static let loopMinutesKey        = "audipad.dashcam.loopMinutes"
+    static let audioEnabledKey       = "audipad.dashcam.audioEnabled"
+    static let saveDurationSecondsKey = "audipad.dashcam.saveDurationSeconds"
 
-    static let defaultEnabled        = false
-    static let defaultSegmentSeconds = 60
-    static let defaultMaxSegments    = 30
-    static let defaultAudioEnabled   = true
+    static let defaultEnabled              = false
+    static let defaultSegmentSeconds       = 60
+    static let defaultLoopMinutes          = 30
+    static let defaultAudioEnabled         = true
+    static let defaultSaveDurationSeconds  = 30
 
-    static let allowedSegmentSeconds = [30, 60, 120]
-    static let allowedMaxSegments    = [10, 30, 60, 120]
+    static let allowedSegmentSeconds      = [30, 60, 120]
+    static let allowedSaveDurationSeconds = [15, 30, 60, 120]
+
+    /// Loop-length bounds for the Settings Stepper. 5 min is the
+    /// shortest sensible cap (loses incidents quickly); 240 min is
+    /// generous (~12 GB at 60 s/segment, more than enough for any
+    /// drive).
+    static let loopMinutesRange: ClosedRange<Int> = 5...240
+    static let loopMinutesStep: Int = 5
 
     var isRecording: Bool {
         if case .active = state { return true }
@@ -109,6 +123,49 @@ final class DashcamService: NSObject, ObservableObject {
     private var lockRequestedForCurrent = false
     func lockCurrentSegment() {
         lockRequestedForCurrent = true
+    }
+
+    /// Panic-save the last `seconds` of footage. Walks segments/ for
+    /// files whose recordedAt falls inside (now − seconds − segLen,
+    /// now], moves them to segments/locked/, AND flags the currently
+    /// in-flight segment to be locked on its next rotation — so any
+    /// part of the save window that's still being written is also
+    /// preserved.
+    ///
+    /// The `+ segLen` slack on the lower bound captures any segment
+    /// that *started* before the window but is still actively
+    /// covering part of it (e.g. a 60 s segment started 50 s ago is
+    /// 10 s old; saving "last 30 s" must include it because the
+    /// first 20 s of the save window are inside that segment).
+    func saveLastSeconds(_ seconds: Int) {
+        let now = Date()
+        let segLen = Double(segmentSecondsPref)
+        let cutoff = now.addingTimeInterval(-Double(seconds) - segLen)
+
+        let candidates = enumerateActiveSegments().filter {
+            $0.recordedAt >= cutoff
+        }
+        for seg in candidates {
+            let dest = Self.lockedDir.appendingPathComponent(seg.url.lastPathComponent)
+            try? FileManager.default.moveItem(at: seg.url, to: dest)
+        }
+        // Also lock the in-flight segment — it's the one currently
+        // covering the most-recent moment of the save window.
+        lockRequestedForCurrent = true
+        refreshSegments()
+        lastSaveAcknowledged = (now, seconds)
+
+        // Auto-clear the ack after 2.5 s so the TopBar pill fades.
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2.5))
+            await MainActor.run {
+                guard let self else { return }
+                if let ack = self.lastSaveAcknowledged,
+                   ack.at == now {
+                    self.lastSaveAcknowledged = nil
+                }
+            }
+        }
     }
 
     /// Force a fresh enumeration of disk segments — used after
@@ -311,10 +368,25 @@ final class DashcamService: NSObject, ObservableObject {
             ?? Self.defaultSegmentSeconds
         return Self.allowedSegmentSeconds.contains(raw) ? raw : Self.defaultSegmentSeconds
     }
+    private var loopMinutesPref: Int {
+        let raw = UserDefaults.standard.object(forKey: Self.loopMinutesKey) as? Int
+            ?? Self.defaultLoopMinutes
+        return min(max(raw, Self.loopMinutesRange.lowerBound),
+                   Self.loopMinutesRange.upperBound)
+    }
+    /// Derived cap — ceil(loopMinutes × 60 / segmentSeconds) so the
+    /// loop's actual on-disk duration matches the user's chosen
+    /// minutes regardless of segment length. Always at least 1.
     private var maxSegmentsPref: Int {
-        let raw = UserDefaults.standard.object(forKey: Self.maxSegmentsKey) as? Int
-            ?? Self.defaultMaxSegments
-        return Self.allowedMaxSegments.contains(raw) ? raw : Self.defaultMaxSegments
+        let totalSeconds = loopMinutesPref * 60
+        let segs = (totalSeconds + segmentSecondsPref - 1) / segmentSecondsPref
+        return max(1, segs)
+    }
+    var saveDurationPref: Int {
+        let raw = UserDefaults.standard.object(forKey: Self.saveDurationSecondsKey) as? Int
+            ?? Self.defaultSaveDurationSeconds
+        return Self.allowedSaveDurationSeconds.contains(raw)
+            ? raw : Self.defaultSaveDurationSeconds
     }
 
     // MARK: - Paths

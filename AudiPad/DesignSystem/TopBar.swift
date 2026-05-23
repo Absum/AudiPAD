@@ -40,6 +40,12 @@ struct TopBar: View {
 
             if dashcam.isRecording {
                 DashcamRECIndicator()
+                DashcamSaveButton {
+                    dashcam.saveLastSeconds(dashcam.saveDurationPref)
+                }
+                if let ack = dashcam.lastSaveAcknowledged {
+                    DashcamSaveAcknowledged(seconds: ack.seconds)
+                }
             }
 
             StatusPill(symbol: "thermometer.medium",
@@ -79,6 +85,56 @@ private struct DashcamRECIndicator: View {
                 .foregroundStyle(SQ5Colors.textSecondary)
         }
         .onAppear { on = true }
+    }
+}
+
+/// Panic-save button — locks the previous N seconds of dashcam
+/// footage so loop-cleanup won't touch it. Only visible alongside
+/// the REC indicator (i.e. while actively recording). Matches the
+/// REC dot's visual weight so the pair reads as one control group.
+private struct DashcamSaveButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: "bookmark.fill")
+                    .font(.system(size: 10, weight: .bold))
+                Text("SAVE")
+                    .font(.system(size: 10, weight: .heavy))
+                    .tracking(1.6)
+            }
+            .foregroundStyle(SQ5Colors.textPrimary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .stroke(SQ5Colors.accent.opacity(0.85), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Brief acknowledgement pill that flashes for ~2.5 s after a save,
+/// confirming the duration that was locked. Disappears via
+/// DashcamService clearing its `lastSaveAcknowledged` published
+/// property.
+private struct DashcamSaveAcknowledged: View {
+    let seconds: Int
+
+    var body: some View {
+        Text("SAVED \(seconds)s")
+            .font(.system(size: 10, weight: .heavy))
+            .tracking(1.6)
+            .foregroundStyle(SQ5Colors.success)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(SQ5Colors.success.opacity(0.15))
+            )
+            .transition(.opacity.combined(with: .scale(scale: 0.95)))
     }
 }
 

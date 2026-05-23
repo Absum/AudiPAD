@@ -15,10 +15,11 @@ struct SettingsView: View {
     @AppStorage(MapBasemap.Defaults.basemapKey) private var basemapRaw: String = MapBasemap.Defaults.defaultBasemap.rawValue
     @AppStorage(MapBasemap.Defaults.stadiaKeyKey) private var stadiaApiKey: String = ""
 
-    @AppStorage(DashcamService.enabledKey)       private var dashcamEnabled: Bool = DashcamService.defaultEnabled
-    @AppStorage(DashcamService.segmentSecondsKey) private var dashcamSegmentSeconds: Int = DashcamService.defaultSegmentSeconds
-    @AppStorage(DashcamService.maxSegmentsKey)   private var dashcamMaxSegments: Int = DashcamService.defaultMaxSegments
-    @AppStorage(DashcamService.audioEnabledKey)  private var dashcamAudioEnabled: Bool = DashcamService.defaultAudioEnabled
+    @AppStorage(DashcamService.enabledKey)            private var dashcamEnabled: Bool = DashcamService.defaultEnabled
+    @AppStorage(DashcamService.segmentSecondsKey)     private var dashcamSegmentSeconds: Int = DashcamService.defaultSegmentSeconds
+    @AppStorage(DashcamService.loopMinutesKey)        private var dashcamLoopMinutesPref: Int = DashcamService.defaultLoopMinutes
+    @AppStorage(DashcamService.audioEnabledKey)       private var dashcamAudioEnabled: Bool = DashcamService.defaultAudioEnabled
+    @AppStorage(DashcamService.saveDurationSecondsKey) private var dashcamSaveDurationSeconds: Int = DashcamService.defaultSaveDurationSeconds
 
     @EnvironmentObject private var dashcam: DashcamService
 
@@ -294,20 +295,48 @@ struct SettingsView: View {
                 .padding(.vertical, 14)
                 Divider().background(SQ5Colors.border)
 
-                // Max segments picker
+                // Loop length stepper — user-configurable in 5-min
+                // steps from 5 to 240 min.
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Loop capacity")
+                        Text("Loop length")
                             .font(SQ5Typography.body)
                             .foregroundStyle(SQ5Colors.textPrimary)
-                        Text("≈ \(dashcamLoopMinutes) min of footage")
+                        Text("Keep the most recent footage, drop older")
                             .font(SQ5Typography.caption)
                             .foregroundStyle(SQ5Colors.textTertiary)
                     }
                     Spacer()
-                    Picker("", selection: $dashcamMaxSegments) {
-                        ForEach(DashcamService.allowedMaxSegments, id: \.self) { c in
-                            Text("\(c) segs").tag(c)
+                    Stepper(value: $dashcamLoopMinutesPref,
+                            in: DashcamService.loopMinutesRange,
+                            step: DashcamService.loopMinutesStep) {
+                        Text("\(dashcamLoopMinutesPref) min")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                            .monospacedDigit()
+                            .frame(minWidth: 70, alignment: .trailing)
+                    }
+                    .labelsHidden()
+                    .tint(SQ5Colors.accent)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                Divider().background(SQ5Colors.border)
+
+                // Save-last-N-seconds duration picker
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Save button duration")
+                            .font(SQ5Typography.body)
+                            .foregroundStyle(SQ5Colors.textPrimary)
+                        Text("How much of the recent loop the SAVE button locks")
+                            .font(SQ5Typography.caption)
+                            .foregroundStyle(SQ5Colors.textTertiary)
+                    }
+                    Spacer()
+                    Picker("", selection: $dashcamSaveDurationSeconds) {
+                        ForEach(DashcamService.allowedSaveDurationSeconds, id: \.self) { s in
+                            Text("\(s) s").tag(s)
                         }
                     }
                     .labelsHidden()
@@ -386,17 +415,13 @@ struct SettingsView: View {
         }
     }
 
-    private var dashcamLoopMinutes: Int {
-        max(1, (dashcamSegmentSeconds * dashcamMaxSegments) / 60)
-    }
-
     private var dashcamStatusText: String {
         switch dashcam.state {
         case .disabled:                  return "Off"
         case .awaitingPermission:        return "Requesting permission…"
         case .permissionDenied(let m):   return m
         case .starting:                  return "Starting…"
-        case .active:                    return "Recording (\(dashcamSegmentSeconds) s segments)"
+        case .active:                    return "Recording · \(dashcamLoopMinutesPref) min loop @ \(dashcamSegmentSeconds) s segments"
         case .error(let m):              return "Error: \(m)"
         }
     }
