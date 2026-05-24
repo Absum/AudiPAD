@@ -353,11 +353,20 @@ final class RacingService: ObservableObject {
     }
 
     private func tick() {
+        // Defensive belt-and-braces: any tracker that's NOT in
+        // .running has its elapsed forced back to 0. Without this,
+        // GPS noise flicking state .completed → .armed → .running
+        // for a single frame could leave a stale non-zero elapsed
+        // visible to the UI between fixes.
         if case let .running(startedAt) = zeroToHundredState {
             zeroToHundredElapsed = Date().timeIntervalSince(startedAt)
+        } else if zeroToHundredElapsed != 0 {
+            zeroToHundredElapsed = 0
         }
         if case let .running(startedAt) = quarterMileState {
             quarterMileElapsed = Date().timeIntervalSince(startedAt)
+        } else if quarterMileElapsed != 0 {
+            quarterMileElapsed = 0
         }
     }
 

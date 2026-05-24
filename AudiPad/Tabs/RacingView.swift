@@ -267,7 +267,7 @@ struct RacingView: View {
                 KpiDivider()
                 RacingHero(
                     label: "Live",
-                    value: zeroToHundredEnabled
+                    value: (zeroToHundredEnabled && zeroToHundredIsRunning)
                         ? String(format: "%.2f", racing.zeroToHundredElapsed)
                         : "—",
                     unit: "s",
@@ -342,7 +342,7 @@ struct RacingView: View {
                 KpiDivider()
                 RacingHero(
                     label: "Live",
-                    value: quarterMileEnabled
+                    value: (quarterMileEnabled && quarterMileIsRunning)
                         ? String(format: "%.2f", racing.quarterMileElapsed)
                         : "—",
                     unit: "s",
@@ -491,12 +491,19 @@ private struct RacingHero: View {
                 .foregroundStyle(SQ5Colors.textTertiary)
 
             HStack(alignment: .lastTextBaseline, spacing: 6) {
+                // Fixed-width container so the trailing unit Text
+                // doesn't jitter horizontally when the value's
+                // formatted-string width changes (e.g. "0.00" → "—"
+                // → "7.02" → minimum-scaled values). Width is sized
+                // to comfortably fit "999.99" at this font + leaves
+                // headroom for unit/scale animation.
                 Text(value)
                     .font(.system(size: 42, weight: .light, design: .default))
                     .foregroundStyle(valueColor)
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
+                    .frame(minWidth: 110, alignment: .trailing)
                 Text(unit)
                     .font(SQ5Typography.subtitle)
                     .foregroundStyle(SQ5Colors.textSecondary)
